@@ -22,10 +22,12 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
 from . import auth, claude_runner, generate, jobs, storage
-from .config import CLAUDE_MODEL, CONTENT_ROOT
+from .config import (CLAUDE_MODEL, CONTENT_ROOT, MCP_ALLOWED_HOSTS,
+                     MCP_ALLOWED_ORIGINS)
 from .docx_export import markdown_to_docx
 from .render import render_markdown, title_from_markdown
 
@@ -53,6 +55,12 @@ mcp = FastMCP(
     streamable_http_path="/",
     stateless_http=True,
     json_response=True,
+    # Keeps DNS-rebinding protection on, but teaches it the public name the
+    # TLS proxy forwards. Without this the proxied Host is rejected with 421.
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=MCP_ALLOWED_HOSTS,
+        allowed_origins=MCP_ALLOWED_ORIGINS,
+    ),
 )
 
 
