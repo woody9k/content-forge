@@ -46,6 +46,53 @@ Agent ────MCP───>      │  /mcp           │
 
 ---
 
+## HTTPS
+
+`deploy/nginx-contentforge.conf` terminates TLS for `contentforge.boblab.net`
+and proxies to uvicorn on `127.0.0.1:8080`. It listens on **8443**, not 443,
+because on the orca box port 443 is already published by an unrelated container.
+
+Two settings in that file are load-bearing rather than cosmetic:
+
+- `proxy_buffering off` — MCP streams over SSE, and with buffering on nginx
+  holds the frames until the response completes, which for a generation is
+  minutes of apparent hang.
+- `proxy_read_timeout 1200s` — comfortably above `CF_CLAUDE_TIMEOUT` (900s), so
+  a slow researched article is not cut off mid-flight.
+
+### Host validation
+
+The MCP SDK enables DNS-rebinding protection on its own, but the host list it
+builds is loopback-only. Behind a proxy the forwarded `Host` is the public name,
+which is not on that list, and every call fails with a bare
+`421 Invalid Host header`. `CF_PUBLIC_HOST` / `CF_PUBLIC_PORT` add it:
+
+| variable | default | meaning |
+|---|---|---|
+| `CF_PUBLIC_HOST` | `contentforge.boblab.net` | proxy `server_name`; empty = local only |
+| `CF_PUBLIC_PORT` | `8443` | port callers use |
+| `CF_MCP_ALLOWED_HOSTS` | derived | comma-separated override |
+| `CF_MCP_ALLOWED_ORIGINS` | derived | comma-separated override |
+
+Loopback keeps the SDK's `:*` wildcard, so the smoke tests still work on their
+ephemeral ports.
+
+### Certificate
+
+Issued by the BobLab internal CA (step-ca at `ca.boblab.net:9000`). The key and
+CSR live in `/etc/ssl/contentforge/` and are reused on renewal, so the key never
+leaves the box:
+
+```bash
+sudo /etc/ssl/contentforge/issue-cert.sh --provisioner <name>
+```
+
+That writes `fullchain.pem`, reloads nginx, and prints the new dates.
+Clients already trust it if `/usr/local/share/ca-certificates/boblab-ca.crt`
+is installed; otherwise pass the CA bundle explicitly.
+
+---
+
 ## Install
 
 Unpack the project wherever you like — it does not need to live in `/opt`.
