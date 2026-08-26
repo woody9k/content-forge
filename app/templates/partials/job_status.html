@@ -1,0 +1,27 @@
+{% if job.status in ("queued", "running") %}
+  <p style="margin:0">
+    <span class="spinner"></span>
+    {{ "Queued — waiting for a free slot…" if job.status == "queued" else "Running…" }}
+  </p>
+  <p class="hint">Started {{ job.created_at[11:19] }} UTC.</p>
+{% elif job.status == "done" %}
+  <p style="margin:0"><strong style="color:var(--ok)">Done.</strong>
+    {% if job.result and job.result.get("words") %}
+      {{ job.result.words }} words
+      {%- if job.result.get("duration") %} in {{ job.result.duration }}s{% endif %}.
+    {% elif job.result and job.result.get("count") %}
+      {{ job.result.count }} ideas.
+    {% endif %}
+  </p>
+  <div class="actions">
+    <a class="btn" href="{{ job.meta.get('redirect', '/') }}">Open it</a>
+  </div>
+  <div hx-get="{{ job.meta.get('redirect', '/') }}" hx-trigger="load delay:1200ms"
+       hx-target="body" hx-swap="outerHTML" hx-push-url="true"></div>
+{% else %}
+  <p style="margin:0"><strong style="color:var(--err)">Failed.</strong></p>
+  <p style="font-size:.88rem;color:var(--muted)">{{ job.error }}</p>
+  <div class="actions">
+    <a class="btn ghost" href="{{ job.meta.get('redirect', '/') }}">Back</a>
+  </div>
+{% endif %}

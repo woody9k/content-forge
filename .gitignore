@@ -1,0 +1,17 @@
+# virtualenv — recreated by run.sh / install-service.sh from requirements.txt
+.venv/
+__pycache__/
+*.py[cod]
+
+# Content lives outside the repo by default ($CF_CONTENT_ROOT, ~/content-forge-data).
+# This catches the case where someone points it inside the checkout instead.
+content-forge-data/
+*.docx
+
+# The subscription token lives in ~/.config/content-forge/env at 0600 and must
+# never be committed. Listed here in case anyone relocates it with CF_TOKEN_FILE.
+env
+.env
+*.credentials.json
+
+.DS_Store

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Auth — Content Forge{% endblock %}
+{% block content %}
+
+<h1>Auth</h1>
+<p class="sub">Which credential this host is using, whether it actually works,
+  and how to replace it.</p>
+
+<div class="card">
+  <h2>Status</h2>
+  <div id="auth-status">
+    {% include "partials/auth_status.html" %}
+  </div>
+  <div class="actions">
+    <button class="btn ghost" hx-post="/auth/test" hx-target="#auth-status"
+            hx-swap="innerHTML" hx-disabled-elt="this"
+            hx-on::before-request="this.textContent='Testing…'"
+            hx-on::after-request="this.textContent='Test now'">Test now</button>
+  </div>
+  <p class="hint">A test spends one real request. It is the only check that
+    distinguishes a valid credential from an expired one — <code>claude auth
+    status</code> reports a dead grant as logged in.
+    A rejected credential can take up to two minutes to fail, because the CLI
+    retries before giving up.</p>
+</div>
+
+<div class="card">
+  <h2>Replace the token</h2>
+  <p class="hint" style="margin-top:0">
+    Generate one on this host as the service user:</p>
+  <pre style="margin:.4rem 0 1rem"><code>claude setup-token</code></pre>
+  <p class="hint" style="margin-top:0">It prints once and the CLI saves it
+    nowhere — that is what this form is for. Tokens last about a year and do not
+    renew themselves.</p>
+
+  <form hx-post="/auth/token" hx-target="#auth-status" hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) this.reset()">
+    <label for="token">Token</label>
+    <input type="password" id="token" name="token" required autocomplete="off"
+           spellcheck="false" placeholder="sk-ant-oat01-…">
+    <label class="check"><input type="checkbox" name="skip_test" value="1">
+      Save without testing first</label>
+    <div class="actions">
+      <button class="btn" type="submit"
+              hx-disabled-elt="this">Test and save</button>
+    </div>
+    <p class="hint">The token is tested before it is written, so a mistyped
+      paste cannot displace a working one. It is saved to
+      <code>{{ auth.token_file }}</code> at mode 0600 and read fresh on every
+      generation — no restart needed.</p>
+  </form>
+</div>
+
+{% if auth.token_present and auth.token_source == "file" %}
+<div class="card">
+  <h2>Remove the token</h2>
+  <p class="hint" style="margin-top:0">Deletes it from
+    <code>{{ auth.token_file }}</code>. The CLI then falls back to whatever
+    <code>claude login</code> stored, which on a headless box is usually a
+    stale grant.</p>
+  <div class="actions">
+    <button class="btn danger" hx-post="/auth/token/delete"
+            hx-target="#auth-status" hx-swap="innerHTML"
+            hx-confirm="Remove the saved token?">Remove token</button>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>How the CLI picks a credential</h2>
+  <p class="hint" style="margin-top:0">In its own order of precedence:</p>
+  <ol class="hint" style="margin:.3rem 0 0;padding-left:1.2rem">
+    <li><code>ANTHROPIC_API_KEY</code> — bills per request. Content Forge strips
+      this from the environment before every call so it can never quietly take
+      over from your subscription.</li>
+    <li><code>CLAUDE_CODE_OAUTH_TOKEN</code> — the token this page manages.</li>
+    <li><code>~/.claude/.credentials.json</code> — written by an interactive
+      <code>claude login</code>. Fine on a desktop; on a service it expires and
+      nothing renews it.</li>
+  </ol>
+</div>
+
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Working… — Content Forge{% endblock %}
+{% block content %}
+
+<h1>{{ job.label }}</h1>
+<p class="sub">
+  {% if job.kind == "article" %}Writing in your voice. Research runs can take several minutes.
+  {% elif job.kind == "voice" %}Reading your samples and extracting a style guide.
+  {% else %}Thinking up angles.{% endif %}
+</p>
+
+<div class="card" id="job" hx-get="/jobs/{{ job.id }}/status"
+     hx-trigger="load, every 2s" hx-swap="innerHTML">
+  {% include "partials/job_status.html" %}
+</div>
+
+<p class="hint">You can navigate away — this keeps running on the server.
+  Active jobs are listed on the <a href="/">Topics</a> page.</p>
+
+{% endblock %}

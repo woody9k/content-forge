@@ -1,0 +1,134 @@
+{# Re-rendered on its own by every /auth action, so it carries the flashes too. #}
+{% if flash_ok %}<div class="banner ok">{{ flash_ok }}</div>{% endif %}
+{% if flash_err %}<div class="banner err">{{ flash_err }}</div>{% endif %}
+
+<p class="rowlabel">In use</p>
+<table>
+  <tbody>
+  <tr>
+    <th style="width:11rem">Credential</th>
+    <td>
+      {% if auth.method == "token" %}
+        <span class="pill ok">subscription token</span>
+        <code>{{ auth.token_masked }}</code>
+        <div class="hint" style="margin:.25rem 0 0">
+          from {{ "the 0600 file below" if auth.token_source == "file"
+                  else "the service environment" }}</div>
+      {% elif auth.method == "credentials" %}
+        <span class="pill warn">stored login</span>
+        <span class="hint">no token saved, so the CLI is falling back to
+          <code>claude login</code></span>
+      {% else %}
+        <span class="pill err">none</span>
+        <span class="hint">generation will fail until a token is saved</span>
+      {% endif %}
+    </td>
+  </tr>
+
+  {% if auth.method == "token" %}
+  <tr>
+    <th>Expires</th>
+    <td>
+      {% if not auth.token_age.saved_at %}
+        <span class="pill grey">unknown</span>
+      {% elif auth.token_age.expired %}
+        <span class="pill err">lapsed ≈ {{ auth.token_age.expires_at[:10] }}</span>
+      {% else %}
+        <span class="pill ok">≈ {{ auth.token_age.expires_at[:10] }}</span>
+        <span class="hint">{{ auth.token_age.days_left }} days left</span>
+      {% endif %}
+      {% if auth.token_age.saved_at %}
+      <div class="hint" style="margin:.25rem 0 0">
+        Saved {{ auth.token_age.saved_at[:10] }}{% if not auth.token_age.exact %}
+        (from the file's timestamp){% endif %}. Approximate: these tokens are
+        opaque, so this is the save date plus the documented ~1 year lifetime,
+        not a date read from the token.</div>
+      {% endif %}
+    </td>
+  </tr>
+  {% endif %}
+
+  {% if auth.method == "credentials" and auth.credentials.exists %}
+  <tr>
+    <th>Expires</th>
+    <td>
+      {% if auth.credentials.expired %}
+        <span class="pill err">expired {{ auth.credentials.expires_at[:10] }}</span>
+        <span class="hint">nothing renews this on a headless box — save a token</span>
+      {% elif auth.credentials.expires_at %}
+        <span class="pill ok">{{ auth.credentials.expires_at[:10] }}</span>
+        <span class="hint">{{ auth.credentials.days_left }} days left</span>
+      {% else %}
+        <span class="pill grey">no expiry recorded</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% endif %}
+
+  <tr>
+    <th>Last live test</th>
+    <td>
+      {% if not probe %}
+        <span class="pill grey">never tested</span>
+        <span class="hint">nothing above proves the credential works — run a test</span>
+      {% elif probe.ok %}
+        <span class="pill ok">passed</span>
+        <span class="hint">{{ probe.at[11:19] }} UTC — {{ probe.detail }}</span>
+      {% else %}
+        <span class="pill err">failed</span>
+        <div style="color:var(--err);font-size:.86rem;margin-top:.25rem">{{ probe.detail }}</div>
+      {% endif %}
+    </td>
+  </tr>
+
+  <tr>
+    <th>Claude CLI</th>
+    <td>
+      {% if cli_ok %}<span class="pill ok">found</span> <code>{{ cli_version }}</code>
+      {% else %}<span class="pill err">missing</span> {{ cli_version }}{% endif %}
+      <div class="hint" style="margin:.25rem 0 0"><code>{{ claude_bin }}</code></div>
+    </td>
+  </tr>
+  </tbody>
+</table>
+
+{# Anything the CLI would only reach for if the active credential vanished.
+   Shown greyed and explicitly labelled: an expired fallback sitting behind a
+   working token is trivia, and colouring it red reads as a live problem. #}
+{% if not auth.credentials_in_use and (auth.credentials.exists or auth.stray_api_keys) %}
+<p class="rowlabel muted-label">Not in use</p>
+<table class="dormant">
+  <tbody>
+  {% if auth.credentials.exists %}
+  <tr>
+    <th style="width:11rem">Stored login</th>
+    <td>
+      <span class="pill grey">
+        {%- if auth.credentials.expired %}expired {{ auth.credentials.expires_at[:10] }}
+        {%- elif auth.credentials.expires_at %}valid to {{ auth.credentials.expires_at[:10] }}
+        {%- else %}present{% endif %}</span>
+      {% if auth.credentials.subscription %}
+        <span class="pill grey">{{ auth.credentials.subscription }}</span>{% endif %}
+      <div class="hint" style="margin:.25rem 0 0">
+        <code>{{ auth.credentials.path }}</code>, written by an interactive
+        <code>claude login</code>. Separate from the token above — saving a token
+        never touches this file, and the CLI only falls back to it if the token
+        is removed.</div>
+    </td>
+  </tr>
+  {% endif %}
+  {% if auth.stray_api_keys %}
+  <tr>
+    <th>API key</th>
+    <td>
+      <span class="pill warn">suppressed</span>
+      <div class="hint" style="margin:.25rem 0 0">
+        {{ auth.stray_api_keys|join(", ") }} present in the service environment.
+        It would outrank the token and bill per request, so Content Forge strips
+        it before every call.</div>
+    </td>
+  </tr>
+  {% endif %}
+  </tbody>
+</table>
+{% endif %}

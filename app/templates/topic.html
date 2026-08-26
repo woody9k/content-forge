@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}{{ topic.name }} — Content Forge{% endblock %}
+{% block content %}
+
+<h1>{{ topic.name }}</h1>
+<p class="sub">{{ topic.description or "No description." }}
+  {% if topic.audience %}<br><em>Audience: {{ topic.audience }}</em>{% endif %}</p>
+
+<div class="tabs">
+  <a href="?tab=articles" class="{{ 'on' if tab == 'articles' }}">Articles ({{ articles|length }})</a>
+  <a href="?tab=write"    class="{{ 'on' if tab == 'write' }}">Write</a>
+  <a href="?tab=ideas"    class="{{ 'on' if tab == 'ideas' }}">Ideas</a>
+  <a href="?tab=voice"    class="{{ 'on' if tab == 'voice' }}">Voice {% if topic.has_voice %}✓{% endif %}</a>
+  <a href="?tab=settings" class="{{ 'on' if tab == 'settings' }}">Settings</a>
+</div>
+
+{# ---------------------------------------------------------------- articles #}
+{% if tab == "articles" %}
+  {% if articles %}
+  <div class="card" style="padding:.4rem .6rem">
+    <table>
+      <thead><tr><th>Title</th><th>Format</th><th>Status</th><th>Created</th><th></th></tr></thead>
+      <tbody>
+      {% for a in articles %}
+      <tr>
+        <td><a href="/topics/{{ topic.slug }}/articles/{{ a.slug }}">{{ a.title }}</a></td>
+        <td><span class="pill grey">{{ a.format }}</span></td>
+        <td>
+          {% if a.status == "ready" %}<span class="pill ok">ready</span>
+          {% elif a.status == "generating" %}<span class="pill warn">generating</span>
+          {% elif a.status == "error" %}<span class="pill err">error</span>
+          {% else %}<span class="pill grey">{{ a.status }}</span>{% endif %}
+          {% if a.with_references %}<span class="pill">refs</span>{% endif %}
+        </td>
+        <td style="color:var(--muted);font-size:.82rem">{{ a.created_at[:10] }}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <a class="btn ghost sm" href="/topics/{{ topic.slug }}/articles/{{ a.slug }}/export.docx">.docx</a>
+          <form method="post" action="/topics/{{ topic.slug }}/articles/{{ a.slug }}/delete"
+                onsubmit="return confirm('Delete “{{ a.title }}”? This removes its folder.')">
+            <button class="btn danger sm" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">Nothing written yet. Head to <a href="?tab=write">Write</a> or
+    get some <a href="?tab=ideas">Ideas</a>.</div>
+  {% endif %}
+{% endif %}
+
+{# ------------------------------------------------------------------- write #}
+{% if tab == "write" %}
+  {% if not topic.has_voice %}
+  <div class="banner">
+    No voice profile for this topic yet — output will use a generic voice.
+    <a href="?tab=voice">Build one</a> from your samples first.
+  </div>
+  {% endif %}
+  <div class="card">
+    <h2>New article</h2>
+    <form method="post" action="/topics/{{ topic.slug }}/articles">
+      <label for="title">Working title</label>
+      <input type="text" id="title" name="title" required
+             placeholder="The model may sharpen this">
+      <label for="prompt">Brief</label>
+      <textarea id="prompt" name="prompt" rows="5"
+        placeholder="What should this piece argue or deliver? Angle, must-hit points, anything to avoid."></textarea>
+      <div class="row">
+        <div>
+          <label for="fmt">Format</label>
+          <select id="fmt" name="fmt">
+            {% for f in ["blog post","how-to","listicle","opinion","explainer","review","newsletter","interview"] %}
+            <option>{{ f }}</option>{% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="words">Target words</label>
+          <input type="number" id="words" name="words" value="900" min="150" max="6000" step="50">
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" name="references" value="1">
+        Research and cite sources (slower — the agent searches the web)</label>
+      <div class="actions"><button class="btn" type="submit">Generate</button></div>
+    </form>
+  </div>
+{% endif %}
+
+{# ------------------------------------------------------------------- ideas #}
+{% if tab == "ideas" %}
+  <div class="card">
+    <h2>Suggest topics</h2>
+    <form method="post" action="/topics/{{ topic.slug }}/ideas">
+      <div class="row">
+        <div>
+          <label for="count">How many ideas</label>
+          <input type="number" id="count" name="count" value="8" min="1" max="20">
+        </div>
+        <div style="flex:2">
+          <label class="check" style="margin-top:1.7rem">
+            <input type="checkbox" name="research" value="1">
+            Search the web for what's current in this space</label>
+        </div>
+      </div>
+      <div class="actions"><button class="btn" type="submit">Get suggestions</button></div>
+      <p class="hint">Ideas already covered by your existing articles are excluded.</p>
+    </form>
+  </div>
+
+  {% if ideas %}
+  <h2 style="margin-top:1.5rem">Suggestions</h2>
+  {% for i in ideas %}
+  <div class="idea">
+    <h3>{{ i.title }}</h3>
+    <p>{{ i.angle }}</p>
+    <p style="color:var(--muted)"><strong>Why now:</strong> {{ i.why }}</p>
+    <form method="post" action="/topics/{{ topic.slug }}/articles">
+      <input type="hidden" name="title" value="{{ i.title }}">
+      <input type="hidden" name="prompt" value="{{ i.angle }} — {{ i.why }}">
+      <input type="hidden" name="fmt" value="{{ i.format }}">
+      <input type="hidden" name="words" value="{{ i.words }}">
+      <label class="check" style="margin:0"><input type="checkbox" name="references" value="1"> with references</label>
+      <button class="btn sm" type="submit">Write this</button>
+    </form>
+  </div>
+  {% endfor %}
+  {% endif %}
+{% endif %}
+
+{# ------------------------------------------------------------------- voice #}
+{% if tab == "voice" %}
+<div class="split">
+  <div>
+    <div class="card">
+      <h2>Writing samples</h2>
+      {% if samples %}
+      <table>
+        <thead><tr><th>File</th><th>Words</th><th></th></tr></thead>
+        <tbody>
+        {% for s in samples %}
+        <tr>
+          <td>{{ s.name }}</td>
+          <td style="color:var(--muted)">{{ s.words }}</td>
+          <td style="text-align:right">
+            <form method="post" action="/topics/{{ topic.slug }}/voice/samples/delete">
+              <input type="hidden" name="name" value="{{ s.name }}">
+              <button class="btn danger sm" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No samples yet.</div>
+      {% endif %}
+
+      <form method="post" action="/topics/{{ topic.slug }}/voice/samples"
+            enctype="multipart/form-data">
+        <label for="files">Upload (.md .txt .docx)</label>
+        <input type="file" id="files" name="files" multiple accept=".md,.txt,.markdown,.docx,.rst">
+        <div class="actions"><button class="btn ghost sm" type="submit">Upload</button></div>
+      </form>
+
+      <form method="post" action="/topics/{{ topic.slug }}/voice/paste" style="margin-top:1rem">
+        <label for="text">…or paste a sample</label>
+        <textarea id="text" name="text" rows="5" placeholder="Paste something you wrote."></textarea>
+        <input type="text" name="name" placeholder="name for this sample" style="margin-top:.5rem">
+        <div class="actions"><button class="btn ghost sm" type="submit">Add sample</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Build the profile</h2>
+      <form method="post" action="/topics/{{ topic.slug }}/voice/build">
+        <label for="notes">Notes about your voice (optional)</label>
+        <textarea id="notes" name="notes" rows="3"
+          placeholder="Anything the samples don't show: words you refuse to use, how formal to go, running jokes."></textarea>
+        <div class="actions">
+          <button class="btn" type="submit">
+            {{ "Rebuild profile" if profile else "Build profile" }}</button>
+        </div>
+        <p class="hint">Reads every sample above and writes a style guide the writer must follow.</p>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Voice profile</h2>
+    {% if profile %}
+    <form method="post" action="/topics/{{ topic.slug }}/voice/profile">
+      <textarea name="profile" class="profile" rows="30">{{ profile }}</textarea>
+      <div class="actions"><button class="btn ghost sm" type="submit">Save edits</button></div>
+      <p class="hint">Hand-editing this is encouraged — it is the single biggest lever on output quality.</p>
+    </form>
+    {% else %}
+    <div class="empty">No profile yet. Add samples, then build.</div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ---------------------------------------------------------------- settings #}
+{% if tab == "settings" %}
+<div class="card">
+  <h2>Topic settings</h2>
+  <form method="post" action="/topics/{{ topic.slug }}/edit">
+    <label for="tname">Name</label>
+    <input type="text" id="tname" name="name" value="{{ topic.name }}" required>
+    <label for="tdesc">Description</label>
+    <textarea id="tdesc" name="description" rows="3">{{ topic.description }}</textarea>
+    <label for="taud">Audience</label>
+    <input type="text" id="taud" name="audience" value="{{ topic.audience }}">
+    <div class="actions"><button class="btn" type="submit">Save</button></div>
+  </form>
+</div>
+<div class="card">
+  <h2>Folder</h2>
+  <p class="hint" style="margin:0 0 .6rem">Everything for this topic lives here on disk:</p>
+  <code>{{ content_root }}/topics/{{ topic.slug }}/</code>
+</div>
+<div class="card">
+  <h2>Danger</h2>
+  <form method="post" action="/topics/{{ topic.slug }}/delete"
+        onsubmit="return confirm('Delete topic “{{ topic.name }}” and all {{ articles|length }} article(s)? This deletes the folder.')">
+    <button class="btn danger" type="submit">Delete this topic</button>
+  </form>
+</div>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,44 @@
+[Unit]
+Description=Content Forge — voice-matched article generation
+Documentation=file:///opt/content-forge/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# !! EVERY PATH AND NAME BELOW IS A PLACEHOLDER. Prefer deploy/install-service.sh,
+# !! which generates this file from your machine's real values. A wrong User=
+# !! fails with status=217/USER; a wrong path fails with 200/CHDIR or 203/EXEC.
+#
+# Run as a real login user, NOT root — the Claude CLI stores its
+# credentials under this user's $HOME/.claude.
+User=CHANGEME
+Group=CHANGEME
+Environment=HOME=/home/CHANGEME
+
+WorkingDirectory=/opt/content-forge
+
+Environment=CF_CONTENT_ROOT=/srv/content-forge-data
+Environment=CF_PORT=8080
+Environment=CF_HOST=0.0.0.0
+Environment=CF_CLAUDE_MODEL=sonnet
+Environment=CF_MAX_CONCURRENT_JOBS=2
+Environment=CF_CLAUDE_TIMEOUT=900
+# Node installs commonly land outside the default systemd PATH:
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/CHANGEME/.local/bin
+
+ExecStart=/opt/content-forge/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Light hardening. Keep ReadWritePaths in sync with CF_CONTENT_ROOT.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths=/srv/content-forge-data -/home/CHANGEME/.claude
+
+[Install]
+WantedBy=multi-user.target

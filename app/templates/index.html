@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+
+{% if not cli_ok %}
+<div class="banner err">
+  <strong>Claude not ready:</strong> {{ cli_version }}<br>
+  Fix it on the <a href="/auth">Auth page</a>.
+</div>
+{% endif %}
+
+<h1>Topics</h1>
+<p class="sub">Each topic is a folder: its own voice profile, its own articles, its own idea list.</p>
+
+{% if active_jobs %}
+<div class="banner">
+  <span class="spinner"></span>
+  {{ active_jobs|length }} generation{{ "s" if active_jobs|length != 1 else "" }} running —
+  {% for j in active_jobs %}<a href="/jobs/{{ j.id }}/wait">{{ j.label }}</a>{{ ", " if not loop.last }}{% endfor %}
+</div>
+{% endif %}
+
+{% if topics %}
+<div class="grid" style="margin-bottom:1.75rem">
+  {% for t in topics %}
+  <a class="topic-card" href="/topics/{{ t.slug }}">
+    <h3>{{ t.name }}</h3>
+    <p>{{ t.description or "No description." }}</p>
+    <div class="pills">
+      <span class="pill">{{ t.article_count }} article{{ "s" if t.article_count != 1 }}</span>
+      {% if t.has_voice %}
+        <span class="pill ok">voice ready</span>
+      {% else %}
+        <span class="pill grey">no voice yet</span>
+      {% endif %}
+      <span class="pill grey">{{ t.sample_count }} sample{{ "s" if t.sample_count != 1 }}</span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">No topics yet — create your first one below.</div>
+{% endif %}
+
+<div class="card">
+  <h2>New topic</h2>
+  <form method="post" action="/topics">
+    <label for="name">Name</label>
+    <input type="text" id="name" name="name" required
+           placeholder="e.g. Youth Sports Parenting">
+    <label for="description">What this topic covers</label>
+    <textarea id="description" name="description" rows="2"
+      placeholder="Scope, recurring themes, what you want to be known for here."></textarea>
+    <label for="audience">Audience</label>
+    <input type="text" id="audience" name="audience"
+           placeholder="e.g. parents of 8–14 year old club athletes">
+    <div class="actions"><button class="btn" type="submit">Create topic</button></div>
+  </form>
+</div>
+
+{% endblock %}

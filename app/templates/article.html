@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}{{ article.title }} — Content Forge{% endblock %}
+{% block content %}
+
+<p class="sub" style="margin-bottom:.5rem">
+  <a href="/topics/{{ topic.slug }}">← {{ topic.name }}</a></p>
+<h1>{{ article.title }}</h1>
+<p class="sub">
+  <span class="pill grey">{{ article.format }}</span>
+  <span class="pill grey">{{ article.word_target }} words target</span>
+  {% if article.with_references %}<span class="pill">with references</span>{% endif %}
+  <span class="pill grey">{{ body.split()|length }} words actual</span>
+</p>
+
+{% if request.query_params.get("saved") %}
+<div class="banner ok">Saved.</div>
+{% endif %}
+{% if article.status == "error" and article.error %}
+<div class="banner err"><strong>Generation failed:</strong> {{ article.error }}</div>
+{% endif %}
+{% if article.status == "generating" %}
+<div class="banner"><span class="spinner"></span> Still generating —
+  <a href="/jobs/{{ article.job_id }}/wait">watch progress</a>.</div>
+{% endif %}
+
+<form method="post" action="/topics/{{ topic.slug }}/articles/{{ article.slug }}">
+  <div class="editor">
+    <div>
+      <label for="title">Title</label>
+      <input type="text" id="title" name="title" value="{{ article.title }}">
+      <label for="body">Markdown</label>
+      <textarea id="body" name="body" spellcheck="true"
+                hx-post="/preview" hx-trigger="keyup changed delay:400ms"
+                hx-target="#preview" hx-swap="innerHTML">{{ body }}</textarea>
+    </div>
+    <div>
+      <label>Preview</label>
+      <div class="preview" id="preview">{{ preview_html|safe if preview_html else "" }}</div>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn" type="submit">Save</button>
+    <a class="btn ghost" href="/topics/{{ topic.slug }}/articles/{{ article.slug }}/export.docx">
+      Download .docx</a>
+    <a class="btn ghost" href="/topics/{{ topic.slug }}/articles/{{ article.slug }}/raw.md">
+      Download .md</a>
+  </div>
+  <p class="hint">Save first — the .docx is built from what's on disk.</p>
+</form>
+
+<div class="card" style="margin-top:1.75rem">
+  <h2>Rewrite</h2>
+  <form method="post" action="/topics/{{ topic.slug }}/articles/{{ article.slug }}/regenerate"
+        onsubmit="return confirm('Regenerate? This replaces the current body.')">
+    <label for="prompt">Brief</label>
+    <textarea id="prompt" name="prompt" rows="4">{{ article.prompt }}</textarea>
+    <div class="row">
+      <div>
+        <label for="rwords">Target words</label>
+        <input type="number" id="rwords" name="words" value="{{ article.word_target }}"
+               min="150" max="6000" step="50">
+      </div>
+      <div>
+        <label class="check" style="margin-top:1.7rem">
+          <input type="checkbox" name="references" value="1"
+                 {{ "checked" if article.with_references }}> Research and cite sources</label>
+      </div>
+    </div>
+    <div class="actions"><button class="btn ghost" type="submit">Regenerate</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Folder</h2>
+  <code>{{ content_root }}/topics/{{ topic.slug }}/articles/{{ article.slug }}/</code>
+</div>
+
+{% endblock %}
