@@ -65,6 +65,24 @@ async def require_access_token(request: Request, call_next):
         ok = _token_matches(password)
 
     if not ok:
+        # A hosted connector platform validates the base URL before it will
+        # register the server, and does it WITHOUT credentials. Answering 401
+        # to that reads as "this host is not usable", so the connector never
+        # reaches the MCP handshake at all. These two paths therefore answer
+        # unauthenticated — and deliberately carry nothing worth having: no
+        # topic, voice, article or tool data, just the service's name.
+        # Everything that touches content stays gated below.
+        if request.url.path == "/robots.txt":
+            return PlainTextResponse("User-agent: *\nDisallow: /\n")
+        if request.url.path == "/" and request.method in ("GET", "HEAD"):
+            return HTMLResponse(
+                "<!doctype html><meta charset=utf-8>"
+                "<title>Content Forge</title>"
+                "<h1>Content Forge</h1>"
+                "<p>This service requires authentication. "
+                '<a href="/voices">Sign in</a>.</p>',
+                status_code=200)
+
         # Both schemes are offered. Basic comes first so a browser still shows
         # its login box for the web UI; Bearer is named so a machine client is
         # told, rather than left to guess, that a token is what we want.

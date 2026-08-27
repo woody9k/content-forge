@@ -458,6 +458,28 @@ try:
               gc.get(probe).status_code == 404, str(gc.get(probe).status_code))
     check("well-known exemption leaks nothing else",
           gc.get("/voices/.well-known/../../voices").status_code in (401, 404))
+
+    # A hosted connector validates the base URL with no credentials; a 401
+    # there stops it registering the server at all. These answer, and carry
+    # nothing worth having.
+    root = gc.get("/")
+    check("unauthenticated / answers, for connector validation",
+          root.status_code == 200, str(root.status_code))
+    check("that page leaks no content",
+          "topic" not in root.text.lower() and "voice profile" not in root.text.lower()
+          and "boat" not in root.text.lower(), root.text[:200])
+    check("unauthenticated /robots.txt answers",
+          gc.get("/robots.txt").status_code == 200)
+    check("robots asks crawlers to stay out",
+          "Disallow: /" in gc.get("/robots.txt").text)
+    # The carve-out must not become a way in.
+    check("POST / still gated", gc.post("/").status_code == 401)
+    for gated in ("/voices", "/topics/x", "/auth", "/mcp"):
+        check(f"{gated} still gated", gc.get(gated).status_code == 401,
+              str(gc.get(gated).status_code))
+    check("authenticated / still serves the real app",
+          "Topics" in gc.get("/", headers={"Authorization":
+                                           "Bearer s3cret-for-the-test"}).text)
     check("/health stays reachable for monitoring",
           gc.get("/health").status_code == 200)
     check("MCP endpoint is gated too",
