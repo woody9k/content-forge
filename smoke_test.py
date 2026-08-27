@@ -208,6 +208,24 @@ check("unknown voice rejected",
       c.post(f"/topics/{slug}/articles",
              data={"title": "x", "prompt": "y", "voice": "ghost"},
              follow_redirects=False).status_code == 400)
+
+# A voice with no profile cannot shape anything. Accepting it would generate
+# generic prose while the article page claimed the voice was applied, so the
+# web path must refuse it exactly as the MCP path does.
+storage.create_voice("Unbuilt")
+r = c.post(f"/topics/{slug}/articles",
+           data={"title": "x", "prompt": "y", "voice": "unbuilt"},
+           follow_redirects=False)
+check("profile-less voice rejected on write", r.status_code == 400, r.text[:160])
+check("rejection says why", "no profile" in r.text.lower(), r.text[:160])
+check("profile-less voice rejected on rewrite",
+      c.post(f"/topics/{slug}/articles/{aslug}/regenerate",
+             data={"voice": "unbuilt"},
+             follow_redirects=False).status_code == 400)
+check("rejected rewrite left the article alone",
+      storage.get_article(slug, aslug).voice == vslug)
+check("profile-less voice not offered in the picker",
+      "unbuilt" not in c.get(f"/topics/{slug}?tab=write").text)
 check("title taken from H1", a.title == "Stub Article", a.title)
 check("body on disk", "stub output" in storage.read_article_body(slug, aslug))
 check("references included", "## References" in storage.read_article_body(slug, aslug))

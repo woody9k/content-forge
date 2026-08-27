@@ -47,6 +47,26 @@ def _voice_or_404(slug: str) -> storage.Voice:
     return v
 
 
+def _usable_voice(slug: str) -> str:
+    """Validate a voice chosen for an article, returning the slug to store.
+
+    A voice with no built profile cannot shape anything — generation would
+    quietly fall back to generic prose while the article page claimed the
+    voice was applied. Refuse it here rather than lie about it later.
+    """
+    if not slug:
+        return ""
+    v = storage.get_voice(slug)
+    if not v:
+        raise HTTPException(400, f"No voice '{slug}'")
+    if not v.has_profile:
+        raise HTTPException(
+            400, f"Voice '{v.name}' has no profile built yet, so it cannot "
+                 "shape the writing. Build it from its samples first, or "
+                 "choose no voice.")
+    return v.slug
+
+
 def _render(request: Request, name: str, **ctx) -> HTMLResponse:
     ctx["request"] = request
     ctx.setdefault("model", CLAUDE_MODEL)
@@ -62,7 +82,6 @@ def _render(request: Request, name: str, **ctx) -> HTMLResponse:
 def index(request: Request):
     ok, ver = claude_runner.cli_available()
     return _render(request, "index.html", topics=storage.list_topics(),
-                   voices=storage.list_voices(),
                    cli_ok=ok, cli_version=ver, active_jobs=jobs.active())
 
 
@@ -203,12 +222,11 @@ def new_article(slug: str, title: str = Form(...), prompt: str = Form(""),
                 voice: str = Form("")):
     t = _topic_or_404(slug)
     valid_styles = [s for s in styles if s in prompts.WRITING_STYLES]
-    if voice and not storage.get_voice(voice):
-        raise HTTPException(400, f"No voice '{voice}'")
+    vslug = _usable_voice(voice)
     a = storage.create_article(slug, title, prompt or title,
                                with_references=bool(references),
                                word_target=max(150, min(words, 6000)), fmt=fmt,
-                               voice=voice, styles=valid_styles)
+                               voice=vslug, styles=valid_styles)
     a.status = "generating"
     job = jobs.submit("article", f"{t.name} — {a.title}",
                       lambda: generate.generate_article(t, a),
@@ -256,9 +274,7 @@ def regenerate(slug: str, aslug: str, prompt: str = Form(""),
         a.prompt = prompt.strip()
     a.with_references = bool(references)
     a.styles = [s for s in styles if s in prompts.WRITING_STYLES]
-    if voice and not storage.get_voice(voice):
-        raise HTTPException(400, f"No voice '{voice}'")
-    a.voice = voice
+    a.voice = _usable_voice(voice)
     if words:
         a.word_target = max(150, min(words, 6000))
     a.status = "generating"

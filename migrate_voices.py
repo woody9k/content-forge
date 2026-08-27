@@ -64,15 +64,20 @@ def plan() -> list[dict]:
 
         old_profile = old_voice / "profile.md"
         old_samples = old_voice / "samples"
-        sample_files = ([f for f in sorted(old_samples.iterdir())
-                         if f.suffix.lower() in storage.SAMPLE_SUFFIXES]
-                        if old_samples.is_dir() else [])
+        all_files = ([f for f in sorted(old_samples.iterdir()) if f.is_file()]
+                     if old_samples.is_dir() else [])
+        sample_files = [f for f in all_files
+                        if f.suffix.lower() in storage.SAMPLE_SUFFIXES]
+        # Files the app would not have read are still the user's, and are
+        # carried across rather than dropped.
+        other_files = [f for f in all_files if f not in sample_files]
         has_profile = old_profile.is_file()
 
-        if not has_profile and not sample_files:
+        if not has_profile and not all_files:
             # An empty scaffold carries nothing worth a voice of its own.
             steps.append({"topic": tdir.name, "action": "drop-empty",
-                          "voice": None, "samples": 0, "articles": []})
+                          "voice": None, "samples": 0, "other": 0,
+                          "articles": []})
             continue
 
         name = _topic_name(tdir)
@@ -98,8 +103,26 @@ def plan() -> list[dict]:
 
         steps.append({"topic": tdir.name, "action": "promote", "voice": vslug,
                       "voice_name": name, "profile": has_profile,
-                      "samples": len(sample_files), "articles": articles})
+                      "samples": len(sample_files),
+                      "other": len(other_files), "articles": articles})
     return steps
+
+
+def _remove_if_empty(old_voice: Path, topic: str) -> None:
+    """Delete the drained voice/ folder, but never anything still in it.
+
+    Everything the migration knows about has been moved by this point. If a
+    file is still here it is something we did not account for, and losing it
+    to a blind rmtree is not an acceptable outcome for a one-shot migration.
+    """
+    leftovers = [p for p in old_voice.rglob("*") if p.is_file()]
+    if leftovers:
+        names = ", ".join(str(p.relative_to(old_voice)) for p in leftovers[:5])
+        more = f" (+{len(leftovers) - 5} more)" if len(leftovers) > 5 else ""
+        print(f"  ! {topic}: left {old_voice} in place — still holds "
+              f"{len(leftovers)} file(s): {names}{more}")
+        return
+    shutil.rmtree(old_voice)
 
 
 def apply(steps: list[dict]) -> None:
@@ -108,7 +131,7 @@ def apply(steps: list[dict]) -> None:
         old_voice = tdir / "voice"
 
         if s["action"] == "drop-empty":
-            shutil.rmtree(old_voice)
+            _remove_if_empty(old_voice, s["topic"])
             print(f"  {s['topic']}: removed empty voice/ scaffold")
             continue
 
@@ -128,9 +151,11 @@ def apply(steps: list[dict]) -> None:
         if old_samples.is_dir():
             dest = storage.voice_samples_dir(vslug)
             dest.mkdir(parents=True, exist_ok=True)
+            # Move everything, not just the extensions the app recognises.
+            # A file the user put here by hand is theirs; a migration has no
+            # business deleting it just because we would not have read it.
             for f in sorted(old_samples.iterdir()):
-                if f.suffix.lower() in storage.SAMPLE_SUFFIXES:
-                    shutil.move(str(f), str(dest / f.name))
+                shutil.move(str(f), str(dest / f.name))
 
         for aslug in s["articles"]:
             meta = storage.article_dir(s["topic"], aslug) / "meta.json"
@@ -140,7 +165,7 @@ def apply(steps: list[dict]) -> None:
             meta.write_text(json.dumps(data, indent=2, ensure_ascii=False),
                             encoding="utf-8")
 
-        shutil.rmtree(old_voice)
+        _remove_if_empty(old_voice, s["topic"])
         print(f"  {s['topic']}: -> voice '{vslug}' "
               f"({s['samples']} samples, profile={'yes' if s['profile'] else 'no'}, "
               f"{len(s['articles'])} articles relinked)")
@@ -165,8 +190,10 @@ def main() -> int:
         else:
             print(f"  {s['topic']}: -> voice '{s['voice']}' "
                   f"(\"{s['voice_name']}\")")
+            other = (f", other files carried across: {s['other']}"
+                     if s["other"] else "")
             print(f"      profile: {'yes' if s['profile'] else 'no'}, "
-                  f"samples: {s['samples']}, "
+                  f"samples: {s['samples']}{other}, "
                   f"articles to relink: {len(s['articles'])}")
 
     if not args.apply:

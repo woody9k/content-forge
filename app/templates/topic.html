@@ -72,9 +72,8 @@
           <label for="voice">Voice</label>
           <select id="voice" name="voice">
             <option value="">Generic (no voice)</option>
-            {% for v in voices %}
-            <option value="{{ v.slug }}" {{ "disabled" if not v.has_profile }}>
-              {{ v.name }}{{ " — no profile built" if not v.has_profile }}</option>
+            {% for v in voices if v.has_profile %}
+            <option value="{{ v.slug }}">{{ v.name }}</option>
             {% endfor %}
           </select>
         </div>
