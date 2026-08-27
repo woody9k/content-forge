@@ -436,10 +436,12 @@ async def update_voice(
     name: Annotated[str, Field(
         description="New display name. Leave empty to keep the current one.",
         max_length=200)] = "",
-    description: Annotated[str | None, Field(
-        description="New description. Leave unset (null) to keep the current "
-                    "one; pass an empty string to clear it.",
-        max_length=2000)] = None,
+    description: Annotated[str, Field(
+        description="New description. Leave empty to keep the current one.",
+        max_length=2000)] = "",
+    clear_description: Annotated[bool, Field(
+        description="Remove the description entirely. Ignored if "
+                    "`description` is given.")] = False,
 ) -> str:
     """Rename a voice, or change its description.
 
@@ -458,8 +460,10 @@ async def update_voice(
     changes = {}
     if name.strip():
         changes["name"] = name.strip()
-    if description is not None:
+    if description.strip():
         changes["description"] = description.strip()
+    elif clear_description:
+        changes["description"] = ""
     if not changes:
         raise ToolError(
             "Nothing to change — pass `name`, `description`, or both.")
@@ -838,23 +842,30 @@ async def rewrite_article(
                                             "the current one.", ge=0, le=6000)] = 0,
     references: Annotated[bool, Field(
         description="Whether this run should research and cite sources.")] = False,
-    voice: Annotated[str | None, Field(
-        description="Replacement voice slug. Leave unset (null) to keep the "
-                    "current one; pass an empty string to drop to a generic "
-                    "tone.", max_length=80)] = None,
+    voice: Annotated[str, Field(
+        description="Replacement voice slug. Leave empty to keep the voice "
+                    "this article already has.", max_length=80)] = "",
     styles: Annotated[list[Literal["expository", "persuasive", "descriptive",
                                    "narrative", "minimalist", "lyrical",
-                                   "conversational", "analytical"]] | None,
-                      Field(description="Replacement writing-style modes to "
-                                        "layer on top of the voice. Leave "
-                                        "unset (null) to keep the current "
-                                        "ones; pass [] to clear them.")] = None,
+                                   "conversational", "analytical"]],
+                      Field(description="Replacement writing-style modes. "
+                                        "Leave empty to keep the ones this "
+                                        "article already has.")] = [],
+    drop_voice: Annotated[bool, Field(
+        description="Rewrite in a generic tone, discarding whatever voice the "
+                    "article was written in. Ignored if `voice` is given.")] = False,
+    drop_styles: Annotated[bool, Field(
+        description="Rewrite with no writing-style modes at all. Ignored if "
+                    "`styles` is given.")] = False,
 ) -> str:
     """Start a job that regenerates an existing article, replacing its body.
 
     Use this to re-cut a finished piece in a different voice or style without
     starting over: pass voice='bob' or styles=['narrative'] and leave the rest
-    unset to inherit.
+    empty to inherit what the article already has.
+
+    Anything you do not pass is kept. To positively remove a voice or the
+    styles rather than replace them, set drop_voice or drop_styles.
 
     Destructive: the current body is overwritten when the job completes. Save a
     copy with content_forge_get_article first if it matters.
@@ -868,20 +879,24 @@ async def rewrite_article(
     if brief.strip():
         a.prompt = brief.strip()
     a.with_references = references
-    if styles is not None:
+
+    if styles:
         a.styles = list(styles)
-    if voice is not None:
-        if voice.strip():
-            v = _voice(voice)
-            if not v.has_profile:
-                raise ToolError(
-                    f"Voice '{v.slug}' has no profile built yet. Run "
-                    "content_forge_build_voice_profile first, or pass an empty "
-                    "voice for a generic tone."
-                )
-            a.voice = v.slug
-        else:
-            a.voice = ""
+    elif drop_styles:
+        a.styles = []
+
+    if voice.strip():
+        v = _voice(voice)
+        if not v.has_profile:
+            raise ToolError(
+                f"Voice '{v.slug}' has no profile built yet. Run "
+                "content_forge_build_voice_profile first, or set drop_voice "
+                "to rewrite in a generic tone."
+            )
+        a.voice = v.slug
+    elif drop_voice:
+        a.voice = ""
+
     if words:
         a.word_target = words
     a.status = "generating"
