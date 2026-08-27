@@ -70,5 +70,5 @@ variable "hosted_zone_id" {
 variable "domain_name" {
   description = "Public hostname for Content Forge."
   type        = string
-  default     = "contentcreator.socialupkeep.com"
+  default     = "write.socialupkeep.com"
 }
