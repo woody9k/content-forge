@@ -21,7 +21,8 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError as _SDKToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
@@ -36,7 +37,7 @@ from .render import render_markdown, title_from_markdown
 ALLOW_DELETE = os.environ.get("CF_MCP_ALLOW_DELETE", "").strip().lower() in (
     "1", "true", "yes", "on")
 
-mcp = FastMCP(
+mcp = MCPServer(
     "content_forge_mcp",
     instructions=(
         "Content Forge writes articles. Three independent things combine on "
@@ -60,6 +61,11 @@ mcp = FastMCP(
         "Topic, voice and article identifiers are slugs (e.g. 'boat-life'), "
         "not display names — list them if you only have a name."
     ),
+)
+
+# In SDK 2.x the transport settings moved off the constructor and onto the app
+# factory, so they live here rather than above.
+_HTTP_APP_KWARGS = dict(
     streamable_http_path="/",
     stateless_http=True,
     json_response=True,
@@ -76,8 +82,13 @@ mcp = FastMCP(
 # helpers
 # --------------------------------------------------------------------------
 
-class ToolError(Exception):
-    """Reported back to the agent as tool output, not a protocol error."""
+class ToolError(_SDKToolError):
+    """Reported back to the agent as tool output, not a protocol error.
+
+    Subclasses the SDK's own ToolError so the message survives: anything else
+    is wrapped as UnexpectedToolError and the agent sees a bare "Error
+    executing tool X" instead of the actionable text we wrote.
+    """
 
 
 def _dump(data: Any) -> str:
@@ -1131,7 +1142,7 @@ if ALLOW_DELETE:
 # mounting
 # --------------------------------------------------------------------------
 
-mcp_http_app = mcp.streamable_http_app()
+mcp_http_app = mcp.streamable_http_app(**_HTTP_APP_KWARGS)
 
 
 class _ExactPathBridge:
@@ -1175,6 +1186,10 @@ async def lifespan(app):
         yield
 
 
-def tool_names() -> list[str]:
-    """Registered tool names — used by the smoke test."""
-    return sorted(t.name for t in mcp._tool_manager.list_tools())
+async def tool_names() -> list[str]:
+    """Registered tool names — used by the smoke test.
+
+    Async since SDK 2.x, where list_tools() is the public accessor and the
+    private tool manager it replaced is gone.
+    """
+    return sorted(t.name for t in await mcp.list_tools())
