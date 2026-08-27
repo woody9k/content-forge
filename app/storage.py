@@ -428,11 +428,20 @@ def save_voice_image(voice: str, data: bytes) -> str:
             "That does not look like a PNG, JPEG, GIF or WebP image.")
 
     suffix = next(s for s, m in IMAGE_SUFFIXES.items() if m == media)
-    delete_voice_image(voice)          # only ever one portrait per voice
     d = voice_dir(voice)
     d.mkdir(parents=True, exist_ok=True)
     dest = d / f"portrait{suffix}"
-    dest.write_bytes(data)
+
+    # Land the new picture first, then clear the old one: a failed write
+    # should leave the voice with the portrait it already had, not none.
+    tmp = d / f".portrait{suffix}.tmp"
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    for other in IMAGE_SUFFIXES:       # only ever one portrait per voice
+        if other != suffix:
+            stale = d / f"portrait{other}"
+            if stale.is_file():
+                stale.unlink()
     return dest.name
 
 

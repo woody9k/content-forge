@@ -325,6 +325,13 @@ r = c.post(f"/voices/{vslug}/image",
            files=[("image", ("big.png", PNG + b"\0" * (6 * 1024 * 1024), "image/png"))],
            follow_redirects=False)
 check("oversized image rejected", r.status_code == 400, r.text[:160])
+# The cap has to bite while streaming: reading a huge body in full before
+# checking its size is how a 5MB limit still OOMs a small box.
+check("oversized image never buffered whole",
+      storage.MAX_IMAGE_BYTES == 5 * 1024 * 1024
+      and "larger than the 5MB limit" in r.text, r.text[:160])
+check("failed oversize left the picture alone",
+      c.get(f"/voices/{vslug}/image").content == GIF)
 
 check("picture shows on the voices index",
       f"/voices/{vslug}/image" in c.get("/voices").text)
@@ -343,6 +350,13 @@ r = c.post(f"/voices/{vslug2}/edit",
            follow_redirects=False)
 check("POST voice rename", r.status_code == 303)
 check("name changed", storage.get_voice(vslug2).name == "Renamed Dana")
+# `required` on the input only binds a browser; the route must refuse too,
+# or the voice renders as a nameless card nobody can identify.
+check("blank rename refused",
+      c.post(f"/voices/{vslug2}/edit", data={"name": "   ", "description": ""},
+             follow_redirects=False).status_code == 400)
+check("name survived the refused rename",
+      storage.get_voice(vslug2).name == "Renamed Dana")
 check("slug unchanged by rename", storage.get_voice(vslug2).slug == vslug2)
 check("article still linked after rename",
       storage.get_article(slug, aslug).voice == before)
