@@ -143,6 +143,8 @@ def _topic_dict(t: storage.Topic) -> dict:
 def _voice_dict(v: storage.Voice) -> dict:
     return {"slug": v.slug, "name": v.name, "description": v.description,
             "has_profile": v.has_profile, "sample_count": v.sample_count,
+            "has_image": v.has_image,
+            "image_url": f"/voices/{v.slug}/image" if v.has_image else None,
             "created_at": v.created_at, "updated_at": v.updated_at}
 
 
@@ -186,11 +188,13 @@ def _topics_md(rows: list[dict]) -> str:
 def _voices_md(rows: list[dict]) -> str:
     if not rows:
         return "No voices yet. Create one with content_forge_create_voice."
-    lines = ["| Slug | Name | Profile | Samples |", "|---|---|---|---|"]
+    lines = ["| Slug | Name | Profile | Samples | Picture |",
+             "|---|---|---|---|---|"]
     for v in rows:
         lines.append(f"| `{v['slug']}` | {v['name']} | "
                      f"{'ready' if v['has_profile'] else 'not built'} | "
-                     f"{v['sample_count']} |")
+                     f"{v['sample_count']} | "
+                     f"{'yes' if v['has_image'] else 'no'} |")
     return "\n".join(lines)
 
 
@@ -348,7 +352,11 @@ async def list_voices(
 
     Returns JSON: {total, count, offset, has_more, next_offset, items[]} where
     each item is {slug, name, description, has_profile, sample_count,
-    created_at, updated_at}.
+    has_image, image_url, created_at, updated_at}.
+
+    Note that `slug` and `name` can diverge: a voice keeps the slug it was
+    created with even after being renamed, so match on `name` when a human
+    said the name, and pass `slug` to the other tools.
     """
     rows = [_voice_dict(v) for v in storage.list_voices()]
     if ready_only:
@@ -414,6 +422,49 @@ async def create_voice(
         raise ToolError("Voice name cannot be empty.")
     v = storage.create_voice(name, description)
     return _dump(_voice_dict(v))
+
+
+@mcp.tool(
+    name="content_forge_update_voice",
+    annotations={"title": "Rename or describe a voice", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": False},
+)
+async def update_voice(
+    voice: Annotated[str, Field(description="Voice slug (or its current "
+                                            "display name).", min_length=1)],
+    name: Annotated[str, Field(
+        description="New display name. Leave empty to keep the current one.",
+        max_length=200)] = "",
+    description: Annotated[str | None, Field(
+        description="New description. Leave unset (null) to keep the current "
+                    "one; pass an empty string to clear it.",
+        max_length=2000)] = None,
+) -> str:
+    """Rename a voice, or change its description.
+
+    Renaming is safe at any time: the slug is the identity and never changes,
+    so every article already written in this voice stays linked to it. Only
+    the label people see moves. That means the slug and the display name can
+    legitimately diverge — a voice created as 'boat-life' and later renamed
+    'Bob' keeps the slug 'boat-life'.
+
+    A voice's picture is set in the web UI, not here; content_forge_list_voices
+    reports whether one exists.
+
+    Returns JSON: the updated voice object.
+    """
+    v = _voice(voice)
+    changes = {}
+    if name.strip():
+        changes["name"] = name.strip()
+    if description is not None:
+        changes["description"] = description.strip()
+    if not changes:
+        raise ToolError(
+            "Nothing to change — pass `name`, `description`, or both.")
+    updated = storage.update_voice(v.slug, **changes)
+    return _dump(_voice_dict(updated))
 
 
 @mcp.tool(

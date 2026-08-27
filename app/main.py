@@ -182,6 +182,10 @@ def voice_page(request: Request, slug: str, tab: str = "profile"):
 @app.post("/voices/{slug}/edit")
 def edit_voice(slug: str, name: str = Form(...), description: str = Form("")):
     _voice_or_404(slug)
+    # Same rule as creating one: a nameless voice is unidentifiable in the
+    # list. The input is marked required, but that only binds a browser.
+    if not name.strip():
+        raise HTTPException(400, "Voice name required")
     storage.update_voice(slug, name=name.strip(), description=description.strip())
     return RedirectResponse(f"/voices/{slug}?tab=settings", status_code=303)
 
@@ -190,6 +194,55 @@ def edit_voice(slug: str, name: str = Form(...), description: str = Form("")):
 def delete_voice(slug: str):
     storage.delete_voice(slug)
     return RedirectResponse("/voices", status_code=303)
+
+
+@app.get("/voices/{slug}/image")
+def voice_image(slug: str):
+    _voice_or_404(slug)
+    p = storage.voice_image_path(slug)
+    if not p:
+        raise HTTPException(404, "This voice has no portrait.")
+    # nosniff matters: the bytes are user-supplied, and without it a browser
+    # could decide to interpret them as something executable.
+    return FileResponse(str(p),
+                        media_type=storage.voice_image_media_type(p),
+                        headers={"X-Content-Type-Options": "nosniff",
+                                 "Cache-Control": "no-cache"})
+
+
+@app.post("/voices/{slug}/image")
+async def upload_voice_image(slug: str, image: UploadFile = File(...)):
+    _voice_or_404(slug)
+
+    # Read in chunks and stop the moment the cap is passed. Reading the whole
+    # body first would mean a 1GB upload costs 1GB of RAM before we get as far
+    # as rejecting it — on a small box that is the difference between a 400 and
+    # the OOM killer.
+    limit = storage.MAX_IMAGE_BYTES
+    chunks, total = [], 0
+    while True:
+        chunk = await image.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                400, f"That image is larger than the "
+                     f"{limit // (1024 * 1024)}MB limit.")
+        chunks.append(chunk)
+
+    try:
+        storage.save_voice_image(slug, b"".join(chunks))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return RedirectResponse(f"/voices/{slug}?tab=settings", status_code=303)
+
+
+@app.post("/voices/{slug}/image/delete")
+def remove_voice_image(slug: str):
+    _voice_or_404(slug)
+    storage.delete_voice_image(slug)
+    return RedirectResponse(f"/voices/{slug}?tab=settings", status_code=303)
 
 
 @app.post("/voices/{slug}/samples")

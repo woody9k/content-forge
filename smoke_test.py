@@ -283,6 +283,86 @@ check("that voice's profile is what generation would load",
       storage.get_voice_profile(picked.voice).startswith("## Dana"),
       storage.get_voice_profile(picked.voice)[:40])
 
+print("\n--- voice identity: rename and picture ---")
+# A 1x1 PNG, and a 1x1 GIF, as real bytes.
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082")
+GIF = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!" \
+      b"\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" \
+      b"\x00\x02\x02D\x01\x00;"
+
+check("no picture initially", storage.get_voice(vslug).has_image is False)
+r = c.post(f"/voices/{vslug}/image",
+           files=[("image", ("me.png", PNG, "image/png"))],
+           follow_redirects=False)
+check("POST voice image", r.status_code == 303, r.text[:200])
+check("picture recorded", storage.get_voice(vslug).has_image is True)
+r = c.get(f"/voices/{vslug}/image")
+check("GET voice image", r.status_code == 200 and r.content == PNG)
+check("served as png", r.headers["content-type"] == "image/png",
+      r.headers.get("content-type", ""))
+check("served with nosniff",
+      r.headers.get("x-content-type-options") == "nosniff")
+
+# Replacing swaps the file rather than accumulating one per format.
+c.post(f"/voices/{vslug}/image", files=[("image", ("me.gif", GIF, "image/gif"))],
+       follow_redirects=False)
+check("replacing leaves exactly one portrait",
+      len([f for f in storage.voice_dir(vslug).iterdir()
+           if f.name.startswith("portrait")]) == 1)
+check("replacement served as gif",
+      c.get(f"/voices/{vslug}/image").headers["content-type"] == "image/gif")
+
+# Content type is decided by the bytes, not the filename an uploader chose.
+r = c.post(f"/voices/{vslug}/image",
+           files=[("image", ("evil.png", b"<script>alert(1)</script>", "image/png"))],
+           follow_redirects=False)
+check("non-image rejected despite .png name", r.status_code == 400, r.text[:160])
+check("rejection did not disturb the existing picture",
+      c.get(f"/voices/{vslug}/image").content == GIF)
+r = c.post(f"/voices/{vslug}/image",
+           files=[("image", ("big.png", PNG + b"\0" * (6 * 1024 * 1024), "image/png"))],
+           follow_redirects=False)
+check("oversized image rejected", r.status_code == 400, r.text[:160])
+# The cap has to bite while streaming: reading a huge body in full before
+# checking its size is how a 5MB limit still OOMs a small box.
+check("oversized image never buffered whole",
+      storage.MAX_IMAGE_BYTES == 5 * 1024 * 1024
+      and "larger than the 5MB limit" in r.text, r.text[:160])
+check("failed oversize left the picture alone",
+      c.get(f"/voices/{vslug}/image").content == GIF)
+
+check("picture shows on the voices index",
+      f"/voices/{vslug}/image" in c.get("/voices").text)
+check("voice without a picture falls back to initials",
+      "avatar-fallback" in c.get(f"/voices/{vslug2}").text)
+
+r = c.post(f"/voices/{vslug}/image/delete", follow_redirects=False)
+check("DELETE voice image", r.status_code == 303
+      and storage.get_voice(vslug).has_image is False)
+check("image 404s once removed", c.get(f"/voices/{vslug}/image").status_code == 404)
+
+# Renaming must not break the link from articles, which is by slug.
+before = storage.get_article(slug, aslug).voice
+r = c.post(f"/voices/{vslug2}/edit",
+           data={"name": "Renamed Dana", "description": "Still lyrical."},
+           follow_redirects=False)
+check("POST voice rename", r.status_code == 303)
+check("name changed", storage.get_voice(vslug2).name == "Renamed Dana")
+# `required` on the input only binds a browser; the route must refuse too,
+# or the voice renders as a nameless card nobody can identify.
+check("blank rename refused",
+      c.post(f"/voices/{vslug2}/edit", data={"name": "   ", "description": ""},
+             follow_redirects=False).status_code == 400)
+check("name survived the refused rename",
+      storage.get_voice(vslug2).name == "Renamed Dana")
+check("slug unchanged by rename", storage.get_voice(vslug2).slug == vslug2)
+check("article still linked after rename",
+      storage.get_article(slug, aslug).voice == before)
+check("new name renders on the article",
+      "Renamed Dana" in c.get(f"/topics/{slug}/articles/{aslug}").text)
+
 print("\n--- exports ---")
 r = c.get(f"/topics/{slug}/articles/{aslug}/export.docx")
 check("GET export.docx", r.status_code == 200 and len(r.content) > 5000,

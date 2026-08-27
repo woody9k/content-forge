@@ -1,0 +1,19 @@
+{# A voice's portrait, or its initials when it has none.
+
+   size is one of sm / md / lg (see .avatar in style.css). Kept in one place
+   so the picture looks the same everywhere a voice is shown. #}
+{% macro avatar(voice, size="sm") -%}
+  {%- if voice.has_image -%}
+    <img class="avatar {{ size }}" src="/voices/{{ voice.slug }}/image"
+         alt="{{ voice.name }}" loading="lazy">
+  {%- else -%}
+    {%- set parts = voice.name.split() -%}
+    <span class="avatar avatar-fallback {{ size }}" aria-hidden="true">
+      {%- if parts | length > 1 -%}
+        {{ parts[0][0] }}{{ parts[1][0] }}
+      {%- else -%}
+        {{ voice.name[:2] }}
+      {%- endif -%}
+    </span>
+  {%- endif -%}
+{%- endmacro %}
