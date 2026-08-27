@@ -38,6 +38,15 @@ async def require_access_token(request: Request, call_next):
     if not ACCESS_TOKEN or request.url.path in ("/health",):
         return await call_next(request)
 
+    # An MCP client probes for OAuth metadata before it will talk to us
+    # (RFC 9728), at both /.well-known/... and <mount>/.well-known/... .
+    # Answering 401 there says "you may not even ask how to authenticate",
+    # which reads as a broken handshake rather than "no OAuth here" — some
+    # clients then give up instead of falling back to their configured token.
+    # We do not implement OAuth, and 404 is how you say so.
+    if "/.well-known/" in request.url.path:
+        return PlainTextResponse("Not Found", status_code=404)
+
     # RFC 7235: the auth scheme is case-insensitive. Matching it exactly meant
     # a spec-compliant client sending "bearer" got a 401 indistinguishable from
     # a wrong token — an afternoon lost to a credential that was fine.
@@ -56,9 +65,13 @@ async def require_access_token(request: Request, call_next):
         ok = _token_matches(password)
 
     if not ok:
+        # Both schemes are offered. Basic comes first so a browser still shows
+        # its login box for the web UI; Bearer is named so a machine client is
+        # told, rather than left to guess, that a token is what we want.
         return PlainTextResponse(
             "Unauthorized", status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Content Forge"'})
+            headers={"WWW-Authenticate":
+                     'Basic realm="Content Forge", Bearer realm="Content Forge"'})
     return await call_next(request)
 
 
