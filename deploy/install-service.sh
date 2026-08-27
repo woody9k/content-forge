@@ -13,6 +13,8 @@ RUN_HOME="$HOME"
 CONTENT_ROOT="${CF_CONTENT_ROOT:-$RUN_HOME/content-forge-data}"
 PORT="${CF_PORT:-8080}"
 MODEL="${CF_CLAUDE_MODEL:-sonnet}"
+PUBLIC_HOST="${CF_PUBLIC_HOST:-contentforge.boblab.net}"
+PUBLIC_PORT="${CF_PUBLIC_PORT:-8443}"
 
 if [ "$RUN_USER" = "root" ]; then
   echo "!! Run this as your normal user, not root — the Claude CLI keeps its" >&2
@@ -24,6 +26,7 @@ fi
 echo "==> app dir      : $APP_DIR"
 echo "==> service user : $RUN_USER:$RUN_GROUP  (home $RUN_HOME)"
 echo "==> content root : $CONTENT_ROOT"
+echo "==> public host  : $PUBLIC_HOST:$PUBLIC_PORT"
 
 if [ ! -x "$APP_DIR/.venv/bin/uvicorn" ]; then
   echo "==> creating virtualenv"
@@ -101,6 +104,28 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   echo "   explicitly unsets it, so the service stays on your subscription." >&2
 fi
 
+# --- access token -----------------------------------------------------------
+# Gates every request (web UI + /mcp) once this instance is reachable from
+# outside the LAN — see app/config.py / app/main.py. Left unset, the app is
+# open exactly as before, so this only matters on a publicly-reachable box.
+if [ -f "$ENV_FILE" ] && grep -q '^CF_ACCESS_TOKEN=' "$ENV_FILE"; then
+  echo "==> access token : reusing $ENV_FILE"
+elif [ -n "${CF_ACCESS_TOKEN:-}" ]; then
+  grep -v '^CF_ACCESS_TOKEN=' "$ENV_FILE" > "$ENV_FILE.new" 2>/dev/null || : > "$ENV_FILE.new"
+  printf 'CF_ACCESS_TOKEN=%s\n' "$CF_ACCESS_TOKEN" >> "$ENV_FILE.new"
+  mv "$ENV_FILE.new" "$ENV_FILE"; chmod 600 "$ENV_FILE"
+  echo "==> access token : written to $ENV_FILE (0600), from CF_ACCESS_TOKEN"
+elif [ -n "$PUBLIC_HOST" ]; then
+  GENERATED="$(openssl rand -hex 32)"
+  mkdir -p "$(dirname "$ENV_FILE")"; touch "$ENV_FILE"; chmod 600 "$ENV_FILE"
+  grep -v '^CF_ACCESS_TOKEN=' "$ENV_FILE" > "$ENV_FILE.new" 2>/dev/null || : > "$ENV_FILE.new"
+  printf 'CF_ACCESS_TOKEN=%s\n' "$GENERATED" >> "$ENV_FILE.new"
+  mv "$ENV_FILE.new" "$ENV_FILE"; chmod 600 "$ENV_FILE"
+  echo "==> access token : generated and written to $ENV_FILE (0600)"
+  echo "                   COPY THIS NOW — it is not printed again:"
+  echo "                   $GENERATED"
+fi
+
 # Node installs live outside systemd's default PATH; make sure claude's dir is in.
 SERVICE_PATH="$(dirname "$CLAUDE_BIN"):/usr/local/bin:/usr/bin:/bin:$RUN_HOME/.local/bin"
 
@@ -132,6 +157,8 @@ Environment=CF_CLAUDE_MODEL=$MODEL
 Environment=CF_CLAUDE_BIN=$CLAUDE_BIN
 Environment=CF_MAX_CONCURRENT_JOBS=2
 Environment=CF_CLAUDE_TIMEOUT=900
+Environment=CF_PUBLIC_HOST=$PUBLIC_HOST
+Environment=CF_PUBLIC_PORT=$PUBLIC_PORT
 Environment=PATH=$SERVICE_PATH
 
 # The subscription token, 0600, kept out of this world-readable unit.
