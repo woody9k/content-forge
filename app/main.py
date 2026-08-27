@@ -15,6 +15,7 @@ from .config import (APP_DIR, CLAUDE_BIN, CLAUDE_MODEL, CONTENT_ROOT,
                      REQUIRE_AUTH, SESSION_COOKIE, SESSION_TTL,
                      public_base_url)
 from .docx_export import markdown_to_docx
+from . import mcp_server
 from .mcp_server import lifespan as mcp_lifespan, mount_mcp
 from .render import clean_markdown as _clean_markdown, render_markdown
 from .render import title_from_markdown as _title_from_markdown
@@ -108,9 +109,21 @@ def _note_login_failure(key: str) -> None:
 def _login_key(request: Request, username: str) -> str:
     """Keyed on client and username together, so one attacker hammering a
     single account cannot lock every other user out of signing in."""
-    client = request.headers.get("x-forwarded-for", "")
-    client = client.split(",")[0].strip() or (
-        request.client.host if request.client else "?")
+    # X-Forwarded-For is only worth anything if a proxy we trust wrote it.
+    # nginx runs on this host, so a proxied request arrives from loopback;
+    # uvicorn also binds 0.0.0.0, so a request straight to :8080 does not, and
+    # its header is whatever the caller felt like sending.
+    #
+    # Even then it is the LAST entry that counts: $proxy_add_x_forwarded_for
+    # appends the real peer to anything the client supplied, so the first
+    # entry is attacker-controlled and would let one rotate a header value
+    # and walk straight past this throttle.
+    peer = request.client.host if request.client else "?"
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if peer in ("127.0.0.1", "::1") and forwarded:
+        client = forwarded.split(",")[-1].strip() or peer
+    else:
+        client = peer
     return f"{client}|{username.strip().lower()}"
 
 
@@ -138,7 +151,21 @@ async def authenticate(request: Request, call_next):
         return await call_next(request)
 
     if path == "/mcp" or path.startswith("/mcp/"):
-        return await call_next(request)          # gated by the SDK, see above
+        if mcp_server.MCP_AUTH_ENABLED:
+            return await call_next(request)      # gated by the SDK, see above
+        # The SDK only gates /mcp when there is a public URL to build an
+        # issuer from. Forcing CF_REQUIRE_AUTH on without one would otherwise
+        # leave the whole site behind a login while /mcp — which can spend the
+        # Claude subscription and read every article — stayed wide open. Fall
+        # through to the token check below instead of assuming.
+        request.state.user = _user_from_request(request)
+        if request.state.user is None:
+            return JSONResponse(
+                {"error": "unauthorized",
+                 "detail": "Present a personal access token."},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="Content Forge"'})
+        return await call_next(request)
 
     if path.startswith("/.well-known/") or path in _OAUTH_EXACT:
         return await call_next(request)
@@ -642,8 +669,17 @@ def auth_clear_token(request: Request):
 
 
 @app.get("/health")
-def health():
+def health(request: Request):
     ok, ver = claude_runner.cli_available()
+
+    # Anonymous callers get liveness and nothing else. This route has to stay
+    # open for monitoring, but the full body reports which Claude credential
+    # is in use, when it expires, where content lives on disk and how much of
+    # it there is — reconnaissance worth having, and this host is on the open
+    # internet. Signed-in users still see everything.
+    if REQUIRE_AUTH and getattr(request.state, "user", None) is None:
+        return JSONResponse({"ok": ok})
+
     st = auth.state()
     return JSONResponse({
         "ok": ok,
@@ -669,11 +705,29 @@ def health():
 # sign-in, invitations and the account page
 # --------------------------------------------------------------------------
 
+def _signed_in(request: Request) -> accounts.User:
+    """The account behind this request, or a clean 404.
+
+    The middleware guarantees a user on gated routes, but only while
+    REQUIRE_AUTH is on. With authentication switched off there is no identity
+    to show, and reaching into `request.state.user` would raise on None and
+    surface as a 500 instead of an answer.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(404, "Accounts are not enabled on this instance.")
+    return user
+
+
 def _safe_next(raw: str) -> str:
     """Only ever redirect within this site. A `next` of `//evil.example` is a
     protocol-relative URL that browsers follow off-site, so the leading-slash
     check has to reject a doubled one too."""
-    if raw.startswith("/") and not raw.startswith("//"):
+    # Browsers normalise a backslash to a slash in the authority position, so
+    # "/\\evil.example" is protocol-relative too and has to go the same way
+    # as "//evil.example".
+    if (raw.startswith("/") and not raw.startswith("//")
+            and not raw.startswith("/\\")):
         return raw
     return "/"
 
@@ -808,7 +862,7 @@ def consent_submit(request: Request, req: str = Form(...),
 
 @app.get("/account", response_class=HTMLResponse)
 def account_page(request: Request, created: str = ""):
-    user = request.state.user
+    user = _signed_in(request)
     return _render(request, "account.html", user=user,
                    tokens=accounts.list_pats(user.id),
                    grants=oauth_provider.list_grants(user.id),
@@ -818,7 +872,7 @@ def account_page(request: Request, created: str = ""):
 
 @app.post("/account/tokens", response_class=HTMLResponse)
 def account_create_token(request: Request, name: str = Form("")):
-    user = request.state.user
+    user = _signed_in(request)
     raw = accounts.create_pat(user.id, name)
     # Shown exactly once — only the hash is stored, so there is no second
     # chance to read it back.
@@ -831,13 +885,14 @@ def account_create_token(request: Request, name: str = Form("")):
 
 @app.post("/account/tokens/{pat_id}/delete")
 def account_revoke_token(request: Request, pat_id: int):
-    accounts.revoke_pat(pat_id, request.state.user.id)
+    accounts.revoke_pat(pat_id, _signed_in(request).id)
     return RedirectResponse("/account", status_code=303)
 
 
 @app.post("/account/connections/{client_id}/delete")
 def account_revoke_connection(request: Request, client_id: str):
-    oauth_provider.revoke_client_for_user(client_id, request.state.user.id)
+    oauth_provider.revoke_client_for_user(client_id,
+                                          _signed_in(request).id)
     return RedirectResponse("/account", status_code=303)
 
 

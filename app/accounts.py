@@ -136,11 +136,11 @@ def init_db() -> None:
     it. The database holds password hashes and token hashes; on a box where the
     content directory is deliberately readable, this one should not be."""
     path = _db_path()
-    fresh = not path.exists()
     with connect() as conn:
         conn.executescript(_SCHEMA)
-    if fresh:
-        os.chmod(path, 0o600)
+    # Unconditionally, not just on creation: a database that already exists
+    # with loose permissions is exactly the one worth fixing.
+    os.chmod(path, 0o600)
 
 
 # --------------------------------------------------------------------------

@@ -131,6 +131,14 @@ async def main():
         check("401 names Bearer",
               "Bearer" in r.headers.get("www-authenticate", ""))
 
+        # /health must stay open for monitoring, but the full body names the
+        # Claude credential in use, its expiry, and where content lives.
+        r = await c.get(f"{BASE}/health")
+        body = r.json()
+        check("anonymous /health is liveness only", set(body) == {"ok"}, str(body))
+        check("anonymous /health hides the credential", "auth" not in body)
+        check("anonymous /health hides the content path", "content_root" not in body)
+
         # -- MCP is gated by the SDK, with the discovery pointer ----------
         r = await c.post(MCP_URL, json={"jsonrpc": "2.0", "id": 1,
                                         "method": "tools/list", "params": {}},
@@ -182,6 +190,19 @@ async def main():
         r = await c.get(f"{BASE}/auth")
         check("admin reaches the Claude credential page", r.status_code == 200,
               r.status_code)
+
+        r = await c.get(f"{BASE}/health")
+        check("signed in, /health reports in full",
+              "auth" in r.json() and r.json()["auth"]["method"], str(r.json())[:120])
+
+        # `next` must never bounce a freshly authenticated user off-site.
+        for evil in ("//evil.example/", "/\\evil.example/",
+                     "https://evil.example/"):
+            r = await c.post(f"{BASE}/login",
+                             data={"username": "alice", "password": ALICE_PW,
+                                   "next": evil})
+            check(f"open redirect refused: {evil}",
+                  r.headers.get("location") == "/", r.headers.get("location"))
 
         # -- the admin gate ----------------------------------------------
         async with httpx2.AsyncClient(follow_redirects=False) as bobc:
@@ -456,6 +477,22 @@ async def main():
         check("logout redirects", r.status_code == 303, r.status_code)
         r = await c.get(f"{BASE}/voices", headers={"accept": "text/html"})
         check("session is dead after logout", r.status_code == 303, r.status_code)
+
+    # The throttle key decides whether the limit can be walked past. nginx
+    # appends the real peer to any client-supplied X-Forwarded-For, so the
+    # first entry is attacker-controlled — and the header counts for nothing
+    # at all unless the request actually came from the local proxy.
+    class _Req:
+        def __init__(self, xff, peer):
+            self.headers = {"x-forwarded-for": xff} if xff else {}
+            self.client = type("C", (), {"host": peer})()
+
+    from app.main import _login_key
+    check("a spoofed XFF prefix does not change the throttle key",
+          _login_key(_Req("9.9.9.9, 203.0.113.5", "127.0.0.1"), "a")
+          == "203.0.113.5|a")
+    check("XFF is ignored on a direct connection",
+          _login_key(_Req("9.9.9.9", "198.51.100.7"), "a") == "198.51.100.7|a")
 
     print()
     if fails:

@@ -516,6 +516,40 @@ finally:
     importlib.reload(_cfg)
     importlib.reload(_main)
 
+# Forcing auth on without a public URL leaves the SDK unable to build an
+# issuer, so it does not gate /mcp. The site would sit behind a login while
+# /mcp — which can spend the Claude subscription and read every article —
+# stayed wide open. The middleware has to cover that case itself.
+print("\n--- /mcp fail-safe ---")
+os.environ["CF_REQUIRE_AUTH"] = "1"
+os.environ["CF_AUTH_DB"] = str(ROOT / "auth-failsafe.db")
+# Set empty, not popped: unset falls back to config.py's non-empty default
+# hostname, which would give the SDK an issuer and defeat the point of the test.
+os.environ["CF_PUBLIC_HOST"] = ""
+os.environ["CF_PUBLIC_BASE_URL"] = ""
+try:
+    importlib.reload(_cfg)
+    importlib.reload(_acc)
+    importlib.reload(_oap)
+    importlib.reload(_mcps)
+    _fs = importlib.reload(_main)
+    check("the SDK is not gating /mcp in this configuration",
+          not _mcps.MCP_AUTH_ENABLED)
+    fc = TestClient(_fs.app)
+    check("/mcp is gated anyway",
+          fc.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                "method": "tools/list"}).status_code == 401)
+    check("/voices is still gated too",
+          fc.get("/voices", headers={"accept": "application/json"}).status_code == 401)
+finally:
+    os.environ["CF_REQUIRE_AUTH"] = "0"
+    os.environ.pop("CF_AUTH_DB", None)
+    os.environ.pop("CF_PUBLIC_BASE_URL", None)
+    os.environ.pop("CF_PUBLIC_HOST", None)
+    importlib.reload(_cfg)
+    importlib.reload(_mcps)
+    importlib.reload(_main)
+
 print("\n--- errors ---")
 check("404 unknown topic", c.get("/topics/nope").status_code == 404)
 check("404 unknown voice", c.get("/voices/nope").status_code == 404)

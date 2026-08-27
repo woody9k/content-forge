@@ -78,6 +78,11 @@ def _auth_kwargs() -> dict:
 
 _AUTH_KWARGS = _auth_kwargs()
 
+# Whether the SDK is gating /mcp. main.py skips /mcp in its own middleware so
+# the SDK's RFC 9728 challenge survives — but that hand-off is only safe while
+# this is true, so it must be readable from there rather than assumed.
+MCP_AUTH_ENABLED = bool(_AUTH_KWARGS)
+
 mcp = MCPServer(
     "content_forge_mcp",
     instructions=(
