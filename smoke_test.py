@@ -444,8 +444,20 @@ try:
     check("bare token without a scheme refused",
           status("s3cret-for-the-test") == 401)
     check("malformed base64 refused", status("Basic !!!notb64!!!") == 401)
-    check("401 advertises how to authenticate",
-          "Basic" in gc.get("/voices").headers.get("www-authenticate", ""))
+    wwwauth = gc.get("/voices").headers.get("www-authenticate", "")
+    check("401 advertises Basic, so a browser still prompts", "Basic" in wwwauth)
+    check("401 also names Bearer, so a token client is not guessing",
+          "Bearer" in wwwauth, wwwauth)
+
+    # An MCP client probes for OAuth metadata before it will talk. 401 there
+    # reads as a broken handshake; 404 correctly says "no OAuth, use your token".
+    for probe in ("/.well-known/oauth-protected-resource",
+                  "/mcp/.well-known/oauth-protected-resource",
+                  "/.well-known/oauth-authorization-server"):
+        check(f"discovery 404s, not 401: {probe}",
+              gc.get(probe).status_code == 404, str(gc.get(probe).status_code))
+    check("well-known exemption leaks nothing else",
+          gc.get("/voices/.well-known/../../voices").status_code in (401, 404))
     check("/health stays reachable for monitoring",
           gc.get("/health").status_code == 200)
     check("MCP endpoint is gated too",
