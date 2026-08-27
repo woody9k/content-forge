@@ -30,7 +30,8 @@ article persuasively as Bob and the next one lyrically as Dana.
   (`.md` `.txt` `.docx`, or paste); Claude extracts a style guide that becomes a
   binding system prompt for any article you apply it to. The profile is a plain
   Markdown file you can hand-edit, which is the single biggest lever on output
-  quality.
+  quality. Each voice can carry a name, a description and a picture — rename it
+  whenever you like, the id underneath never moves, so articles stay linked.
 - **Styles** — expository, persuasive, descriptive, narrative, minimalist,
   lyrical, conversational, analytical. Layered on top of the voice: the voice
   governs the diction and rhythm, the style governs the argument and structure.
@@ -239,6 +240,7 @@ $CF_CONTENT_ROOT/
 ├── voices/
 │   └── bob/
 │       ├── voice.json                name, description
+│       ├── portrait.png              optional picture (png/jpg/gif/webp)
 │       ├── samples/                  the uploaded writing
 │       └── profile.md                the generated style guide (edit me)
 └── topics/
@@ -295,6 +297,7 @@ article an agent started is the same job the browser is watching.
 |---|---|
 | `content_forge_list_topics` / `_get_topic` / `_create_topic` | topics, paginated |
 | `content_forge_list_voices` / `_create_voice` | voices, independent of topic |
+| `content_forge_update_voice` | rename a voice, or change its description |
 | `content_forge_get_voice_profile` / `_set_voice_profile` | read and hand-edit the style guide |
 | `content_forge_add_voice_sample` / `_build_voice_profile` | feed samples, then derive the profile |
 | `content_forge_list_writing_styles` | the style catalogue, with descriptions |

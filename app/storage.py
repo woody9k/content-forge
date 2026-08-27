@@ -39,6 +39,33 @@ from .config import CONTENT_ROOT
 
 SAMPLE_SUFFIXES = {".md", ".txt", ".markdown", ".docx", ".rst"}
 
+# Portrait formats for a voice. SVG is deliberately absent: it can carry
+# script, and the image is served from the app's own origin.
+IMAGE_SUFFIXES = {".png": "image/png", ".jpg": "image/jpeg",
+                  ".jpeg": "image/jpeg", ".gif": "image/gif",
+                  ".webp": "image/webp"}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+# Leading bytes each format must actually start with, so a renamed file
+# cannot masquerade as an image.
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def sniff_image(data: bytes) -> str:
+    """The real media type of `data`, or "" if it is not an image we accept."""
+    for magic, media in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return media
+    # WebP is RIFF-framed: "RIFF" .... "WEBP"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -125,6 +152,18 @@ def voice_profile_path(slug: str) -> Path:
     return voice_dir(slug) / "profile.md"
 
 
+def voice_image_path(slug: str) -> Path | None:
+    """The portrait file for this voice, or None if it has none."""
+    d = voice_dir(slug)
+    if not d.is_dir():
+        return None
+    for suffix in IMAGE_SUFFIXES:
+        p = d / f"portrait{suffix}"
+        if p.is_file():
+            return p
+    return None
+
+
 # --------------------------------------------------------------------------
 # models
 # --------------------------------------------------------------------------
@@ -164,6 +203,10 @@ class Voice:
         if not d.exists():
             return 0
         return len([f for f in d.iterdir() if f.suffix.lower() in SAMPLE_SUFFIXES])
+
+    @property
+    def has_image(self) -> bool:
+        return voice_image_path(self.slug) is not None
 
 
 @dataclass
@@ -364,6 +407,47 @@ def collect_voice_samples_text(voice: str, max_chars: int = 60_000) -> str:
         parts.append(chunk)
         total += len(chunk)
     return "".join(parts).strip()
+
+
+def save_voice_image(voice: str, data: bytes) -> str:
+    """Store a portrait for this voice, replacing any existing one.
+
+    The media type comes from the bytes, not the filename — a caller cannot
+    talk us into storing something that is not actually an image.
+    Raises ValueError with a message fit to show the user.
+    """
+    if not data:
+        raise ValueError("That file is empty.")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"That image is {len(data) // (1024 * 1024)}MB. The limit is "
+            f"{MAX_IMAGE_BYTES // (1024 * 1024)}MB.")
+    media = sniff_image(data)
+    if not media:
+        raise ValueError(
+            "That does not look like a PNG, JPEG, GIF or WebP image.")
+
+    suffix = next(s for s, m in IMAGE_SUFFIXES.items() if m == media)
+    delete_voice_image(voice)          # only ever one portrait per voice
+    d = voice_dir(voice)
+    d.mkdir(parents=True, exist_ok=True)
+    dest = d / f"portrait{suffix}"
+    dest.write_bytes(data)
+    return dest.name
+
+
+def delete_voice_image(voice: str) -> bool:
+    removed = False
+    for suffix in IMAGE_SUFFIXES:
+        p = voice_dir(voice) / f"portrait{suffix}"
+        if p.is_file():
+            p.unlink()
+            removed = True
+    return removed
+
+
+def voice_image_media_type(path: Path) -> str:
+    return IMAGE_SUFFIXES.get(path.suffix.lower(), "application/octet-stream")
 
 
 def get_voice_profile(voice: str) -> str:

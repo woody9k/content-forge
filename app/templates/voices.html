@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/avatar.html" as av %}
 {% block title %}Voices — Content Forge{% endblock %}
 {% block content %}
 
@@ -10,7 +11,10 @@
 <div class="grid" style="margin-bottom:1.75rem">
   {% for v in voices %}
   <a class="topic-card" href="/voices/{{ v.slug }}">
-    <h3>{{ v.name }}</h3>
+    <div class="card-head">
+      {{ av.avatar(v, "md") }}
+      <h3>{{ v.name }}</h3>
+    </div>
     <p>{{ v.description or "No description." }}</p>
     <div class="pills">
       {% if v.has_profile %}

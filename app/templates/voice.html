@@ -1,10 +1,17 @@
 {% extends "base.html" %}
+{% import "partials/avatar.html" as av %}
 {% block title %}{{ voice.name }} — Content Forge{% endblock %}
 {% block content %}
 
 <p class="sub" style="margin-bottom:.5rem"><a href="/voices">← Voices</a></p>
-<h1>{{ voice.name }}</h1>
-<p class="sub">{{ voice.description or "No description." }}</p>
+<div class="voice-head">
+  {{ av.avatar(voice, "md") }}
+  <div>
+    <h1 style="margin:0">{{ voice.name }}</h1>
+    <p class="sub" style="margin:.15rem 0 0">{{ voice.description or "No description." }}
+      <a href="?tab=settings" class="hint" style="margin-left:.4rem">rename / picture</a></p>
+  </div>
+</div>
 
 <div class="tabs">
   <a href="?tab=profile" class="{{ 'on' if tab == 'profile' }}">Profile {% if voice.has_profile %}✓{% endif %}</a>
@@ -87,14 +94,43 @@
 {# ---------------------------------------------------------------- settings #}
 {% if tab == "settings" %}
 <div class="card">
-  <h2>Voice settings</h2>
+  <h2>Name and description</h2>
   <form method="post" action="/voices/{{ voice.slug }}/edit">
     <label for="vname">Name</label>
     <input type="text" id="vname" name="name" value="{{ voice.name }}" required>
     <label for="vdesc">Description</label>
     <textarea id="vdesc" name="description" rows="3">{{ voice.description }}</textarea>
     <div class="actions"><button class="btn" type="submit">Save</button></div>
+    <p class="hint">Renaming is safe at any time — articles are linked by the
+      voice's id (<code>{{ voice.slug }}</code>), which never changes.</p>
   </form>
+</div>
+
+<div class="card">
+  <h2>Picture</h2>
+  <div class="voice-head" style="margin-bottom:.9rem">
+    {{ av.avatar(voice, "lg") }}
+    <div>
+      <p class="hint" style="margin:0">
+        {% if voice.has_image %}Shown wherever this voice appears.
+        {% else %}No picture yet — initials are shown instead.{% endif %}</p>
+      <p class="hint" style="margin:.25rem 0 0">PNG, JPEG, GIF or WebP, up to 5MB.</p>
+    </div>
+  </div>
+  <form method="post" action="/voices/{{ voice.slug }}/image"
+        enctype="multipart/form-data">
+    <input type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp" required>
+    <div class="actions">
+      <button class="btn" type="submit">
+        {{ "Replace picture" if voice.has_image else "Upload picture" }}</button>
+    </div>
+  </form>
+  {% if voice.has_image %}
+  <form method="post" action="/voices/{{ voice.slug }}/image/delete"
+        onsubmit="return confirm('Remove this picture?')">
+    <button class="btn ghost sm" type="submit">Remove picture</button>
+  </form>
+  {% endif %}
 </div>
 <div class="card">
   <h2>Folder</h2>

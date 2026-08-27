@@ -42,6 +42,22 @@ h3{font-size:.95rem;margin:0 0 .5rem}
 .topic-card h3{margin:0 0 .3rem;font-size:1rem}
 .topic-card p{margin:0 0 .7rem;color:var(--muted);font-size:.86rem}
 
+/* voice portraits — round, cropped, never distorted by odd source ratios */
+.avatar{border-radius:50%;object-fit:cover;background:var(--accent-soft);
+  border:1px solid var(--line);flex:0 0 auto;display:block}
+.avatar.sm{width:34px;height:34px}
+.avatar.md{width:52px;height:52px}
+.avatar.lg{width:104px;height:104px}
+/* the fallback when a voice has no picture: its initials */
+.avatar-fallback{display:flex;align-items:center;justify-content:center;
+  color:var(--accent);font-weight:600;letter-spacing:.02em;text-transform:uppercase}
+.avatar-fallback.sm{font-size:.72rem}
+.avatar-fallback.md{font-size:1rem}
+.avatar-fallback.lg{font-size:2rem}
+.voice-head{display:flex;align-items:center;gap:.9rem;margin-bottom:.2rem}
+.card-head{display:flex;align-items:center;gap:.7rem;margin-bottom:.5rem}
+.card-head h3{margin:0}
+
 .pills{display:flex;gap:.4rem;flex-wrap:wrap}
 .pill{font-size:.72rem;padding:.14rem .5rem;border-radius:999px;
   background:var(--accent-soft);color:var(--accent);border:1px solid transparent;white-space:nowrap}
@@ -60,6 +76,11 @@ input[type=text],input[type=number],textarea,select{
   width:100%;padding:.55rem .7rem;border:1px solid var(--line);border-radius:7px;
   background:var(--bg);color:var(--ink);font:inherit;font-size:.92rem}
 textarea{resize:vertical;min-height:90px}
+input[type=file]{font:inherit;font-size:.86rem;color:var(--muted);max-width:100%}
+input[type=file]::file-selector-button{font:inherit;font-size:.86rem;
+  padding:.4rem .8rem;margin-right:.6rem;border-radius:7px;cursor:pointer;
+  border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+input[type=file]::file-selector-button:hover{border-color:var(--accent);color:var(--accent)}
 input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
 .row{display:flex;gap:.8rem;flex-wrap:wrap;align-items:flex-end}
 .row>*{flex:1;min-width:130px}

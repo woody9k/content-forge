@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/avatar.html" as av %}
 {% block title %}{{ article.title }} — Content Forge{% endblock %}
 {% block content %}
 
@@ -8,7 +9,9 @@
 <p class="sub">
   <span class="pill grey">{{ article.format }}</span>
   <span class="pill grey">{{ article.word_target }} words target</span>
-  {% if voice_obj %}<a class="pill ok" href="/voices/{{ voice_obj.slug }}">{{ voice_obj.name }} voice</a>
+  {% if voice_obj %}<a href="/voices/{{ voice_obj.slug }}"
+     style="display:inline-flex;align-items:center;gap:.3rem;vertical-align:middle;text-decoration:none"
+     >{{ av.avatar(voice_obj, "sm") }}<span class="pill ok">{{ voice_obj.name }} voice</span></a>
   {% elif article.voice %}<span class="pill err">voice “{{ article.voice }}” missing</span>
   {% else %}<span class="pill grey">generic voice</span>{% endif %}
   {% if article.with_references %}<span class="pill">with references</span>{% endif %}

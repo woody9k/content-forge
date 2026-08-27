@@ -192,6 +192,37 @@ def delete_voice(slug: str):
     return RedirectResponse("/voices", status_code=303)
 
 
+@app.get("/voices/{slug}/image")
+def voice_image(slug: str):
+    _voice_or_404(slug)
+    p = storage.voice_image_path(slug)
+    if not p:
+        raise HTTPException(404, "This voice has no portrait.")
+    # nosniff matters: the bytes are user-supplied, and without it a browser
+    # could decide to interpret them as something executable.
+    return FileResponse(str(p),
+                        media_type=storage.voice_image_media_type(p),
+                        headers={"X-Content-Type-Options": "nosniff",
+                                 "Cache-Control": "no-cache"})
+
+
+@app.post("/voices/{slug}/image")
+async def upload_voice_image(slug: str, image: UploadFile = File(...)):
+    _voice_or_404(slug)
+    try:
+        storage.save_voice_image(slug, await image.read())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return RedirectResponse(f"/voices/{slug}?tab=settings", status_code=303)
+
+
+@app.post("/voices/{slug}/image/delete")
+def remove_voice_image(slug: str):
+    _voice_or_404(slug)
+    storage.delete_voice_image(slug)
+    return RedirectResponse(f"/voices/{slug}?tab=settings", status_code=303)
+
+
 @app.post("/voices/{slug}/samples")
 async def upload_voice_samples(slug: str, files: list[UploadFile] = File(...)):
     _voice_or_404(slug)

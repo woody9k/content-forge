@@ -72,12 +72,13 @@ async def main():
             check("instructions advertised", bool(init.instructions))
 
             tools = {t.name: t for t in (await s.list_tools()).tools}
-            check("tools listed", len(tools) >= 20, str(len(tools)))
+            check("tools listed", len(tools) >= 21, str(len(tools)))
             check("delete tools gated on", "content_forge_delete_topic" in tools)
             check("voice tools registered",
                   {"content_forge_list_voices", "content_forge_create_voice",
                    "content_forge_delete_voice",
-                   "content_forge_list_writing_styles"} <= tools.keys())
+                   "content_forge_list_writing_styles",
+                   "content_forge_update_voice"} <= tools.keys())
             wa = tools["content_forge_write_article"].inputSchema["properties"]
             check("write_article exposes all three axes",
                   {"topic", "voice", "styles"} <= wa.keys(), str(sorted(wa)))
@@ -155,6 +156,26 @@ async def main():
 
             r = await s.call_tool("content_forge_list_voices", {})
             check("list_voices finds it", json.loads(text_of(r))["total"] == 1)
+            check("list_voices reports picture state",
+                  json.loads(text_of(r))["items"][0]["has_image"] is False,
+                  text_of(r)[:200])
+
+            # Renaming keeps the slug, so articles written in this voice stay
+            # linked to it — the whole reason rename is safe to expose.
+            r = await s.call_tool("content_forge_update_voice",
+                                  {"voice": "bob", "name": "Robert"})
+            renamed = json.loads(text_of(r))
+            check("update_voice renames", renamed["name"] == "Robert", str(renamed))
+            check("update_voice keeps the slug", renamed["slug"] == "bob")
+            r = await s.call_tool("content_forge_update_voice",
+                                  {"voice": "Robert", "description": "Blunt."})
+            check("new name resolves as an identifier",
+                  json.loads(text_of(r))["description"] == "Blunt.", text_of(r)[:160])
+            r = await s.call_tool("content_forge_update_voice", {"voice": "bob"})
+            check("update_voice with nothing to do is an error",
+                  r.isError and "name" in text_of(r), text_of(r)[:160])
+            await s.call_tool("content_forge_update_voice",
+                              {"voice": "bob", "name": "Bob"})
             r = await s.call_tool("content_forge_list_voices",
                                   {"response_format": "markdown"})
             check("voices markdown format", "`bob`" in text_of(r))
