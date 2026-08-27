@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import base64
-import hmac
-from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
-                               RedirectResponse, JSONResponse)
+                               RedirectResponse, JSONResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth, claude_runner, generate, jobs, prompts, storage
-from .config import ACCESS_TOKEN, APP_DIR, CLAUDE_BIN, CLAUDE_MODEL, CONTENT_ROOT
+from . import (accounts, auth, claude_runner, generate, jobs, oauth_provider,
+               prompts, storage)
+from .config import (APP_DIR, CLAUDE_BIN, CLAUDE_MODEL, CONTENT_ROOT,
+                     LEGACY_ACCESS_TOKEN, MCP_SCOPE, PUBLIC_SCHEME,
+                     REQUIRE_AUTH, SESSION_COOKIE, SESSION_TTL,
+                     public_base_url)
 from .docx_export import markdown_to_docx
 from .mcp_server import lifespan as mcp_lifespan, mount_mcp
 from .render import clean_markdown as _clean_markdown, render_markdown
@@ -25,72 +27,168 @@ app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="stati
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 
+def _fmt_timestamp(ts) -> str:
+    """Unix seconds as a local, human date — used on the account page for
+    token ages, where an epoch integer tells the reader nothing."""
+    if not ts:
+        return "never"
+    from datetime import datetime
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+templates.env.filters["timestamp"] = _fmt_timestamp
+
+
 # --------------------------------------------------------------------------
-# access control — a no-op unless CF_ACCESS_TOKEN is set (see config.py)
+# access control
+#
+# Three credentials, one identity. A session cookie for the browser, a
+# personal access token for scripts, an OAuth access token for connectors —
+# each resolves to the same User, which is what the old shared secret could
+# never do. `request.state.user` is set for every request that gets through.
+#
+# /mcp is deliberately NOT gated here. The SDK gates it, and its 401 carries
+# the `WWW-Authenticate: Bearer resource_metadata="..."` pointer a connector
+# follows to discover the authorization server. Answering it ourselves would
+# strip that pointer and put us back where we started.
 # --------------------------------------------------------------------------
 
-def _token_matches(candidate: str) -> bool:
-    return bool(candidate) and hmac.compare_digest(candidate, ACCESS_TOKEN)
+# Reachable with no credential at all. Kept as small as it can be: `/` and
+# `/robots.txt` stay open because a connector platform validates the base URL
+# before it will register anything, and they carry nothing but the service's
+# name. Everything that touches content is gated.
+_PUBLIC_EXACT = frozenset({"/", "/health", "/login", "/robots.txt",
+                           "/favicon.ico"})
+_PUBLIC_PREFIX = ("/static/", "/invite/")
+
+# Endpoints that authenticate their own callers (OAuth client credentials,
+# PKCE, a registration request) and must not be behind a session check.
+_OAUTH_EXACT = frozenset({"/authorize", "/token", "/register", "/revoke"})
+
+
+def _wants_html(request: Request) -> bool:
+    """A browser gets a redirect to the login page; anything else gets a 401
+    it can act on. Guessing wrong means an API client chasing an HTML page."""
+    return "text/html" in request.headers.get("accept", "")
+
+
+# A public login form with no throttle is both a password-guessing oracle and
+# a CPU lever: every attempt costs an scrypt hash. This is deliberately a small
+# in-memory counter rather than a dependency — one process, low traffic, and
+# losing the counters on restart is an acceptable trade for the simplicity.
+_LOGIN_FAILS: dict[str, tuple[int, float]] = {}
+_LOGIN_MAX_FAILS = 8
+_LOGIN_WINDOW = 300.0          # seconds a lockout lasts, and the counting window
+
+
+def _login_blocked(key: str) -> bool:
+    import time
+    fails, first = _LOGIN_FAILS.get(key, (0, 0.0))
+    if fails >= _LOGIN_MAX_FAILS and time.time() - first < _LOGIN_WINDOW:
+        return True
+    if first and time.time() - first >= _LOGIN_WINDOW:
+        _LOGIN_FAILS.pop(key, None)     # window rolled over; start clean
+    return False
+
+
+def _note_login_failure(key: str) -> None:
+    import time
+    now = time.time()
+    fails, first = _LOGIN_FAILS.get(key, (0, now))
+    if now - first >= _LOGIN_WINDOW:
+        fails, first = 0, now
+    _LOGIN_FAILS[key] = (fails + 1, first)
+    if len(_LOGIN_FAILS) > 4096:        # bound the map against distributed noise
+        cutoff = now - _LOGIN_WINDOW
+        for k, (_, t) in list(_LOGIN_FAILS.items()):
+            if t < cutoff:
+                _LOGIN_FAILS.pop(k, None)
+
+
+def _login_key(request: Request, username: str) -> str:
+    """Keyed on client and username together, so one attacker hammering a
+    single account cannot lock every other user out of signing in."""
+    client = request.headers.get("x-forwarded-for", "")
+    client = client.split(",")[0].strip() or (
+        request.client.host if request.client else "?")
+    return f"{client}|{username.strip().lower()}"
+
+
+def _user_from_request(request: Request) -> accounts.User | None:
+    session = request.cookies.get(SESSION_COOKIE, "")
+    if session:
+        user = accounts.session_user(session)
+        if user is not None:
+            return user
+
+    # RFC 7235: the scheme is case-insensitive. Matching it exactly once cost
+    # an afternoon to a credential that was fine all along.
+    scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() == "bearer" and credential.strip():
+        return accounts.user_from_bearer(credential.strip())
+    return None
 
 
 @app.middleware("http")
-async def require_access_token(request: Request, call_next):
-    if not ACCESS_TOKEN or request.url.path in ("/health",):
+async def authenticate(request: Request, call_next):
+    request.state.user = None
+    path = request.url.path
+
+    if not REQUIRE_AUTH:
         return await call_next(request)
 
-    # An MCP client probes for OAuth metadata before it will talk to us
-    # (RFC 9728), at both /.well-known/... and <mount>/.well-known/... .
-    # Answering 401 there says "you may not even ask how to authenticate",
-    # which reads as a broken handshake rather than "no OAuth here" — some
-    # clients then give up instead of falling back to their configured token.
-    # We do not implement OAuth, and 404 is how you say so.
-    if "/.well-known/" in request.url.path:
-        return PlainTextResponse("Not Found", status_code=404)
+    if path == "/mcp" or path.startswith("/mcp/"):
+        return await call_next(request)          # gated by the SDK, see above
 
-    # RFC 7235: the auth scheme is case-insensitive. Matching it exactly meant
-    # a spec-compliant client sending "bearer" got a 401 indistinguishable from
-    # a wrong token — an afternoon lost to a credential that was fine.
-    scheme, _, credentials = request.headers.get("authorization", "").partition(" ")
-    scheme, credentials = scheme.lower(), credentials.strip()
+    if path.startswith("/.well-known/") or path in _OAUTH_EXACT:
+        return await call_next(request)
 
-    ok = False
-    if scheme == "bearer":
-        ok = _token_matches(credentials)
-    elif scheme == "basic":
-        try:
-            _, _, password = base64.b64decode(credentials).decode(
-                "utf-8", "replace").partition(":")
-        except (ValueError, UnicodeDecodeError):
-            password = ""
-        ok = _token_matches(password)
+    request.state.user = _user_from_request(request)
 
-    if not ok:
-        # A hosted connector platform validates the base URL before it will
-        # register the server, and does it WITHOUT credentials. Answering 401
-        # to that reads as "this host is not usable", so the connector never
-        # reaches the MCP handshake at all. These two paths therefore answer
-        # unauthenticated — and deliberately carry nothing worth having: no
-        # topic, voice, article or tool data, just the service's name.
-        # Everything that touches content stays gated below.
-        if request.url.path == "/robots.txt":
-            return PlainTextResponse("User-agent: *\nDisallow: /\n")
-        if request.url.path == "/" and request.method in ("GET", "HEAD"):
-            return HTMLResponse(
-                "<!doctype html><meta charset=utf-8>"
-                "<title>Content Forge</title>"
-                "<h1>Content Forge</h1>"
-                "<p>This service requires authentication. "
-                '<a href="/voices">Sign in</a>.</p>',
-                status_code=200)
+    # The "/" carve-out exists so a connector platform can validate the base
+    # URL without credentials. That is a GET. Letting it cover every method
+    # would turn a read-only exemption into an unauthenticated write surface.
+    root_write = (path == "/" and request.method not in ("GET", "HEAD"))
+    if not root_write and (path in _PUBLIC_EXACT
+                           or path.startswith(_PUBLIC_PREFIX)):
+        return await call_next(request)
 
-        # Both schemes are offered. Basic comes first so a browser still shows
-        # its login box for the web UI; Bearer is named so a machine client is
-        # told, rather than left to guess, that a token is what we want.
-        return PlainTextResponse(
-            "Unauthorized", status_code=401,
-            headers={"WWW-Authenticate":
-                     'Basic realm="Content Forge", Bearer realm="Content Forge"'})
+    if request.state.user is None:
+        if _wants_html(request):
+            target = path
+            if request.url.query:
+                target += "?" + request.url.query
+            return RedirectResponse(f"/login?next={quote(target, safe='')}",
+                                    status_code=303)
+        return JSONResponse(
+            {"error": "unauthorized",
+             "detail": "Sign in, or present a personal access token."},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer realm="Content Forge"'})
+
     return await call_next(request)
+
+
+def _require_admin(request: Request) -> accounts.User:
+    """Guard for anything that changes the box rather than the content.
+
+    The Claude subscription token lives behind this. With one shared secret
+    every caller was implicitly an admin; now that other people can sign in,
+    rotating or deleting the credential the whole service runs on must not be
+    something any of them can do.
+    """
+    if not REQUIRE_AUTH:
+        # Authentication is switched off entirely (a trusted-LAN deployment).
+        # There are no identities to compare, so there is no admin to be: the
+        # gate would otherwise lock everyone out of a page that was open
+        # before this change.
+        return accounts.User(0, "local", "local", is_admin=True)
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(401, "Sign in first.")
+    if not user.is_admin:
+        raise HTTPException(403, "This page is restricted to administrators.")
+    return user
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +240,8 @@ def _render(request: Request, name: str, **ctx) -> HTMLResponse:
     ctx["request"] = request
     ctx.setdefault("model", CLAUDE_MODEL)
     ctx.setdefault("content_root", str(CONTENT_ROOT))
+    ctx.setdefault("current_user", getattr(request.state, "user", None))
+    ctx.setdefault("require_auth", REQUIRE_AUTH)
     # Starlette 1.x takes the request first; the old (name, context) form,
     # where the request rode inside the context, was removed.
     return templates.TemplateResponse(request, name, ctx)
@@ -153,6 +253,12 @@ def _render(request: Request, name: str, **ctx) -> HTMLResponse:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    # Public on purpose: a connector platform validates the base URL without
+    # credentials, and answering 401 there reads as "this host is unusable".
+    # So signed-out callers get the service's name and nothing else — no
+    # topics, no voices, no counts.
+    if REQUIRE_AUTH and getattr(request.state, "user", None) is None:
+        return _render(request, "landing.html")
     ok, ver = claude_runner.cli_available()
     return _render(request, "index.html", topics=storage.list_topics(),
                    cli_ok=ok, cli_version=ver, active_jobs=jobs.active())
@@ -487,12 +593,14 @@ def _auth_ctx(**extra) -> dict:
 
 @app.get("/auth", response_class=HTMLResponse)
 def auth_page(request: Request):
+    _require_admin(request)
     return _render(request, "auth.html", **_auth_ctx())
 
 
 @app.post("/auth/test", response_class=HTMLResponse)
 def auth_test(request: Request):
     """Spend one real request to find out whether the credential works."""
+    _require_admin(request)
     claude_runner.probe()
     return _render(request, "partials/auth_status.html", **_auth_ctx())
 
@@ -500,6 +608,7 @@ def auth_test(request: Request):
 @app.post("/auth/token", response_class=HTMLResponse)
 def auth_save_token(request: Request, token: str = Form(...),
                     skip_test: str = Form("")):
+    _require_admin(request)
     token = token.strip()
     if not token:
         return _render(request, "partials/auth_status.html",
@@ -524,6 +633,7 @@ def auth_save_token(request: Request, token: str = Form(...),
 
 @app.post("/auth/token/delete", response_class=HTMLResponse)
 def auth_clear_token(request: Request):
+    _require_admin(request)
     removed = auth.clear_token()
     return _render(request, "partials/auth_status.html", **_auth_ctx(
         flash_ok="Token removed — falling back to the stored login."
@@ -553,3 +663,234 @@ def health():
         "voices": len(storage.list_voices()),
         "active_jobs": len(jobs.active()),
     })
+
+
+# --------------------------------------------------------------------------
+# sign-in, invitations and the account page
+# --------------------------------------------------------------------------
+
+def _safe_next(raw: str) -> str:
+    """Only ever redirect within this site. A `next` of `//evil.example` is a
+    protocol-relative URL that browsers follow off-site, so the leading-slash
+    check has to reject a doubled one too."""
+    if raw.startswith("/") and not raw.startswith("//"):
+        return raw
+    return "/"
+
+
+def _set_session(response: Response, user: accounts.User) -> None:
+    token = accounts.create_session(user.id)
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        max_age=SESSION_TTL,
+        httponly=True,                      # unreadable from JavaScript
+        samesite="lax",                     # blocks cross-site form POSTs (CSRF)
+        secure=(PUBLIC_SCHEME == "https"),
+        path="/")
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    return "User-agent: *\nDisallow: /\n"
+
+
+@app.get("/favicon.ico")
+def favicon():
+    # The pages carry an inline SVG icon; this only exists so a browser's
+    # automatic request does not bounce off the login redirect.
+    return Response(status_code=204)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "/"):
+    if getattr(request.state, "user", None) is not None:
+        return RedirectResponse(_safe_next(next), status_code=303)
+    return _render(request, "login.html", next=_safe_next(next),
+                   no_accounts=(accounts.count_users() == 0))
+
+
+@app.post("/login")
+def login_submit(request: Request, username: str = Form(...),
+                 password: str = Form(...), next: str = Form("/")):
+    key = _login_key(request, username)
+    if _login_blocked(key):
+        return _render(request, "login.html", next=_safe_next(next),
+                       error="Too many attempts. Wait a few minutes and try "
+                             "again.",
+                       username=username,
+                       no_accounts=(accounts.count_users() == 0))
+
+    user = accounts.verify_password(username, password)
+    if user is None:
+        _note_login_failure(key)
+        # One message for every failure mode. Saying "no such user" would turn
+        # this form into a way to enumerate who has an account here.
+        return _render(request, "login.html", next=_safe_next(next),
+                       error="That username and password did not match.",
+                       username=username,
+                       no_accounts=(accounts.count_users() == 0))
+    _LOGIN_FAILS.pop(key, None)
+    response = RedirectResponse(_safe_next(next), status_code=303)
+    _set_session(response, user)
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request):
+    accounts.destroy_session(request.cookies.get(SESSION_COOKIE, ""))
+    response = RedirectResponse("/", status_code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@app.get("/invite/{token}", response_class=HTMLResponse)
+def invite_page(request: Request, token: str):
+    user = accounts.peek_invite(token)
+    if user is None:
+        return _render(request, "invite.html", expired=True)
+    return _render(request, "invite.html", invited=user, token=token)
+
+
+@app.post("/invite/{token}", response_class=HTMLResponse)
+def invite_submit(request: Request, token: str, password: str = Form(...),
+                  confirm: str = Form(...)):
+    user = accounts.peek_invite(token)
+    if user is None:
+        return _render(request, "invite.html", expired=True)
+    if password != confirm:
+        return _render(request, "invite.html", invited=user, token=token,
+                       error="Those two passwords do not match.")
+    try:
+        claimed = accounts.claim_invite(token, password)
+    except ValueError as exc:
+        return _render(request, "invite.html", invited=user, token=token,
+                       error=str(exc))
+    if claimed is None:
+        return _render(request, "invite.html", expired=True)
+    response = RedirectResponse("/", status_code=303)
+    _set_session(response, claimed)
+    return response
+
+
+@app.get("/consent", response_class=HTMLResponse)
+def consent_page(request: Request, req: str = ""):
+    """Where an OAuth authorization lands once the user is signed in.
+
+    The middleware has already bounced an anonymous caller to /login with this
+    URL as `next`, so by the time we get here there is a real account to bind
+    the eventual token to.
+    """
+    pending = oauth_provider.load_pending(req)
+    if pending is None:
+        return _render(request, "consent.html", expired=True)
+    return _render(request, "consent.html", pending=pending, req=req,
+                   scopes=pending.scopes)
+
+
+@app.post("/consent")
+def consent_submit(request: Request, req: str = Form(...),
+                   decision: str = Form(...)):
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(401, "Sign in first.")
+
+    if decision == "approve":
+        target = oauth_provider.complete_authorization(req, user)
+    else:
+        target = oauth_provider.deny_authorization(req)
+
+    if target is None:
+        return _render(request, "consent.html", expired=True)
+    # 303 to the client's registered redirect_uri, which the SDK validated
+    # against the registration before we ever saw this request.
+    return RedirectResponse(target, status_code=303)
+
+
+@app.get("/account", response_class=HTMLResponse)
+def account_page(request: Request, created: str = ""):
+    user = request.state.user
+    return _render(request, "account.html", user=user,
+                   tokens=accounts.list_pats(user.id),
+                   grants=oauth_provider.list_grants(user.id),
+                   created=created,
+                   mcp_url=(public_base_url() or "") + "/mcp")
+
+
+@app.post("/account/tokens", response_class=HTMLResponse)
+def account_create_token(request: Request, name: str = Form("")):
+    user = request.state.user
+    raw = accounts.create_pat(user.id, name)
+    # Shown exactly once — only the hash is stored, so there is no second
+    # chance to read it back.
+    return _render(request, "account.html", user=user,
+                   tokens=accounts.list_pats(user.id),
+                   grants=oauth_provider.list_grants(user.id),
+                   created=raw,
+                   mcp_url=(public_base_url() or "") + "/mcp")
+
+
+@app.post("/account/tokens/{pat_id}/delete")
+def account_revoke_token(request: Request, pat_id: int):
+    accounts.revoke_pat(pat_id, request.state.user.id)
+    return RedirectResponse("/account", status_code=303)
+
+
+@app.post("/account/connections/{client_id}/delete")
+def account_revoke_connection(request: Request, client_id: str):
+    oauth_provider.revoke_client_for_user(client_id, request.state.user.id)
+    return RedirectResponse("/account", status_code=303)
+
+
+# --------------------------------------------------------------------------
+# OAuth endpoints
+#
+# Mounted at the site root, not under /mcp. RFC 8414 puts authorization
+# server metadata at the issuer's root, and RFC 9728 puts protected resource
+# metadata at /.well-known/oauth-protected-resource/<resource path>. Letting
+# the SDK register them inside the mounted MCP app would bury both under
+# /mcp/, where no client looks for them.
+# --------------------------------------------------------------------------
+
+def _mount_oauth() -> None:
+    base = public_base_url()
+    if not REQUIRE_AUTH or not base:
+        return
+    from pydantic import AnyHttpUrl
+    from mcp.server.auth.routes import (create_auth_routes,
+                                        create_protected_resource_routes)
+    from mcp.server.auth.settings import (ClientRegistrationOptions,
+                                          RevocationOptions)
+
+    routes = create_auth_routes(
+        provider=oauth_provider.provider,
+        issuer_url=AnyHttpUrl(base),
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,                   # a hosted connector self-registers
+            valid_scopes=[MCP_SCOPE],
+            default_scopes=[MCP_SCOPE],
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+    )
+    routes += create_protected_resource_routes(
+        resource_url=AnyHttpUrl(f"{base}/mcp"),
+        authorization_servers=[AnyHttpUrl(base)],
+        scopes_supported=[MCP_SCOPE],
+        resource_name="Content Forge",
+    )
+    app.router.routes.extend(routes)
+
+
+_mount_oauth()
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    oauth_provider.init_db()
+    if LEGACY_ACCESS_TOKEN:
+        print("!!  CF_ACCESS_TOKEN is set but no longer used. Authentication is "
+              "now per-user; remove it from the environment and create "
+              "accounts with: python -m app.accounts add <name> --admin")
+    if REQUIRE_AUTH and accounts.count_users() == 0:
+        print("!!  No accounts exist yet, so nobody can sign in. Create the "
+              "first administrator with:\n"
+              "      python -m app.accounts add <name> --admin")

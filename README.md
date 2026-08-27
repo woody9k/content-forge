@@ -44,8 +44,12 @@ article persuasively as Bob and the next one lyrically as Dana.
 - **Edit** — Markdown editor with live preview in the browser; **Download .docx**
   opens in Word with real headings, lists, blockquotes, code blocks and clickable
   hyperlinks.
-- **Auth** — a page at `/auth` showing which credential this host is actually
-  using, when it expires, and whether it still works. Paste a new token there and
+- **Accounts** — everyone signs in with their own username and password. Your
+  **Account** page mints personal access tokens for scripts and lists the
+  connectors you have approved. See [Accounts](#accounts).
+- **Auth** — an **administrators only** page at `/auth` showing which Claude
+  credential this host is actually using, when it expires, and whether it still
+  works. Paste a new token there and
   it takes effect on the next generation — no restart, no shell.
 
   There are **two independent credentials** on a typical box, and the page keeps
@@ -60,6 +64,54 @@ article persuasively as Bob and the next one lyrically as Dana.
   sit there indefinitely while everything works. That is why it is greyed out and
   labelled *Not in use* rather than flagged red — the CLI only falls back to it
   if the token is removed.
+
+---
+
+## Accounts
+
+Three credentials, one identity — a session cookie for the browser, a personal
+access token for scripts, an OAuth token for connectors. All three resolve to
+the same user, which the single shared secret they replace could never do: it
+could not say who was acting, and could not be revoked for one person without
+locking out everybody.
+
+**There is no self-signup.** This box answers on the open internet and every
+generation spends the owner's Claude subscription, so accounts are created from
+a shell by someone who already has one:
+
+```bash
+./deploy/add-user.sh alice --admin
+```
+
+That prints a single-use invite link, valid 48 hours. Send it to the person;
+they choose their own password, which nobody else ever sees. Reissuing an
+invite voids the previous link.
+
+```bash
+./.venv/bin/python -m app.accounts list
+./.venv/bin/python -m app.accounts invite alice      # new link
+./.venv/bin/python -m app.accounts disable bob       # also kills live sessions
+./.venv/bin/python -m app.accounts promote alice     # grant admin
+```
+
+Admins are the only ones who may open `/auth` and rotate or delete the Claude
+subscription token the whole service runs on. Ordinary users can do everything
+else — the workspace is shared, so there is no per-user content.
+
+Accounts, sessions, tokens and OAuth registrations live in a SQLite file at
+`$CF_CONTENT_ROOT/auth.db`, mode 0600, override with `CF_AUTH_DB`. Passwords
+are scrypt-hashed; every token is stored only as a SHA-256 hash, so a copy of
+the database hands over no live credential — and is why a personal access
+token is shown exactly once, when it is created.
+
+| variable | default | meaning |
+|---|---|---|
+| `CF_REQUIRE_AUTH` | on when `CF_PUBLIC_HOST` is set | force authentication on or off |
+| `CF_AUTH_DB` | `$CF_CONTENT_ROOT/auth.db` | account database |
+| `CF_SESSION_TTL` | `1209600` (14 days) | browser session lifetime |
+| `CF_INVITE_TTL` | `172800` (48 hours) | invite link lifetime |
+| `CF_OAUTH_ACCESS_TTL` | `3600` | OAuth access token lifetime |
+| `CF_OAUTH_REFRESH_TTL` | `2592000` (30 days) | OAuth refresh token lifetime |
 
 ---
 
@@ -228,6 +280,7 @@ All environment variables, all optional:
 | `CF_MCP_ALLOW_DELETE` | unset | `1` also exposes the MCP delete tools |
 | `CF_HOST` / `CF_PORT` | `0.0.0.0` / `8080` | bind address |
 | `CF_FAKE_CLAUDE` | unset | `1` stubs the CLI — used by the smoke test |
+| `CF_REQUIRE_AUTH` | on with `CF_PUBLIC_HOST` | authentication — see [Accounts](#accounts) for the rest |
 
 ---
 
@@ -283,8 +336,12 @@ The same service speaks MCP at **`/mcp`** (streamable HTTP, stateless JSON), so
 an agent harness can drive it over the LAN with nothing installed locally:
 
 ```bash
-claude mcp add --transport http content-forge http://<host>:8080/mcp
+claude mcp add --transport http content-forge https://<host>/mcp \
+    --header "Authorization: Bearer <personal-access-token>" --scope user
 ```
+
+Mint the token on your **Account** page. On a LAN box with no public hostname
+authentication is off and the header can be dropped.
 
 It runs inside the web process on purpose. Generation is asynchronous and the
 job registry lives in memory, so a separate MCP process would keep its own and
@@ -355,10 +412,29 @@ Jobs are in memory. If the service restarts mid-generation the job id is gone
 even though the article folder survives — an agent that loses a job should fall
 back to `content_forge_list_articles` and check the article's `status`.
 
-> **No authentication.** `/mcp` is as open as every other route on this service.
-> Anyone who can reach the port can start a generation and spend your Claude
-> usage window. Same trusted-LAN assumption as the rest of the app — do not
-> port-forward it.
+### Connecting a hosted connector
+
+`/mcp` speaks OAuth 2.1, so a connector platform that will not accept a pasted
+token — ChatGPT, claude.ai — can onboard itself. Point it at the base URL and
+it discovers the rest:
+
+| Endpoint | |
+|---|---|
+| `/.well-known/oauth-authorization-server` | RFC 8414 metadata |
+| `/.well-known/oauth-protected-resource/mcp` | RFC 9728, named in the 401 |
+| `/register` | RFC 7591 dynamic client registration |
+| `/authorize` → `/consent` | you sign in and approve, in a browser |
+| `/token`, `/revoke` | code exchange, refresh rotation, RFC 7009 |
+
+The flow ends at a consent screen, so a token is always bound to a real
+account — a client that registers itself gets nothing until a person approves
+it. Approved connectors are listed on your Account page and can be
+disconnected there.
+
+> **This spends your Claude subscription.** Anyone you give an account to can
+> start generations against your usage window, and the workspace is shared, so
+> they see and can edit everyone's topics, voices and articles. Invite
+> accordingly.
 
 ---
 
@@ -376,6 +452,17 @@ No Claude quota consumed.
 CF_FAKE_CLAUDE=1 ./.venv/bin/python mcp_smoke_test.py
 ```
 
+```bash
+CF_FAKE_CLAUDE=1 ./.venv/bin/python auth_smoke_test.py
+```
+
+Covers sign-in, the admin gate, invites, personal access tokens and the whole
+OAuth flow — registration, consent, code exchange, refresh rotation and
+revocation — finishing by opening a real MCP session on an OAuth-issued token.
+Written because three earlier rounds of connector fixes were validated with
+hand-written `curl` calls and shipped without a real client ever exercising
+them.
+
 Starts a real uvicorn server on an ephemeral port and drives it with a genuine
 MCP client, so the mount, the lifespan wiring and the protocol are exercised —
 not just the Python functions behind the tools.
@@ -384,13 +471,12 @@ not just the Python functions behind the tools.
 
 ## Notes and gotchas
 
-- **Nothing is authenticated.** This binds to `0.0.0.0` and assumes a trusted
-  LAN. Do not port-forward it. If you want it reachable from outside, put it
-  behind your existing ingress with auth in front. The `/auth` page raises the
-  stakes on that: anyone who can reach the port can replace the token or run a
-  test that spends a request. The page never displays a stored token — only a
-  masked prefix — so it cannot be used to *read* the secret back out, but it can
-  be used to overwrite it.
+- **Authentication is on whenever `CF_PUBLIC_HOST` is set**, and off otherwise,
+  so a LAN box behaves exactly as it always did. Set `CF_REQUIRE_AUTH` to force
+  either way. With it off there are no identities, and `/auth` is open to
+  anyone who can reach the port.
+- **The workspace is shared.** Every account sees and can edit every topic,
+  voice and article. There is no per-user content and no read-only role.
 - **Jobs are in-memory.** A restart mid-generation loses the job (the article
   folder survives, marked `generating`); just regenerate. Articles themselves are
   always written to disk before the job reports done.

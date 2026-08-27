@@ -21,13 +21,16 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
+from mcp.server.auth.settings import (AuthSettings,
+                                      ClientRegistrationOptions,
+                                      RevocationOptions)
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError as _SDKToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
 from . import auth, claude_runner, generate, jobs, prompts, storage
-from .config import (CLAUDE_MODEL, CONTENT_ROOT, MCP_ALLOWED_HOSTS,
+from .config import (CLAUDE_MODEL, CONTENT_ROOT, MCP_ALLOWED_HOSTS, MCP_SCOPE,
                      MCP_ALLOWED_ORIGINS)
 from .docx_export import markdown_to_docx
 from .render import render_markdown, title_from_markdown
@@ -36,6 +39,44 @@ from .render import render_markdown, title_from_markdown
 # be able to do that, so they are only registered when explicitly enabled.
 ALLOW_DELETE = os.environ.get("CF_MCP_ALLOW_DELETE", "").strip().lower() in (
     "1", "true", "yes", "on")
+
+# --------------------------------------------------------------------------
+# authentication
+#
+# The SDK gates /mcp for us and, crucially, answers an unauthenticated call
+# with `WWW-Authenticate: Bearer resource_metadata="..."` — the RFC 9728
+# pointer a hosted connector follows to discover where to get a token. That
+# pointer is the whole reason a connector can onboard itself; without it the
+# 401 is a dead end, which is exactly how this service used to behave.
+#
+# Only the *verifier* is registered here. The authorization endpoints
+# themselves are mounted at the site root by main.py, because RFC 8414 puts
+# the metadata at the issuer's root and this app is mounted under /mcp.
+# --------------------------------------------------------------------------
+
+def _auth_kwargs() -> dict:
+    from .config import REQUIRE_AUTH, public_base_url
+    base = public_base_url()
+    if not REQUIRE_AUTH or not base:
+        return {}
+    from .oauth_provider import verifier
+    return dict(
+        token_verifier=verifier,
+        auth=AuthSettings(
+            issuer_url=base,
+            resource_server_url=f"{base}/mcp",
+            required_scopes=[MCP_SCOPE],
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=[MCP_SCOPE],
+                default_scopes=[MCP_SCOPE],
+            ),
+            revocation_options=RevocationOptions(enabled=True),
+        ),
+    )
+
+
+_AUTH_KWARGS = _auth_kwargs()
 
 mcp = MCPServer(
     "content_forge_mcp",
@@ -61,6 +102,7 @@ mcp = MCPServer(
         "Topic, voice and article identifiers are slugs (e.g. 'boat-life'), "
         "not display names — list them if you only have a name."
     ),
+    **_AUTH_KWARGS,
 )
 
 # In SDK 2.x the transport settings moved off the constructor and onto the app

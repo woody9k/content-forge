@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Set your password — Content Forge{% endblock %}
+{% block content %}
+<div class="authbox">
+{% if expired %}
+  <h1>This link has expired</h1>
+  <p class="sub">Invitations are single use and time limited. Ask an
+    administrator to send you a fresh one.</p>
+{% else %}
+  <h1>Welcome, {{ invited.display_name }}</h1>
+  <p class="sub">Choose a password to finish setting up your account.</p>
+
+  {% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+
+  <form method="post" action="/invite/{{ token }}" class="card">
+    <label class="row">
+      <span class="rowlabel">Password</span>
+      <input name="password" type="password" autocomplete="new-password"
+             minlength="12" autofocus required>
+    </label>
+    <label class="row">
+      <span class="rowlabel">Confirm</span>
+      <input name="confirm" type="password" autocomplete="new-password"
+             minlength="12" required>
+    </label>
+    <p class="hint">At least 12 characters. A long passphrase beats a short
+      complicated one.</p>
+    <div class="actions">
+      <button class="btn" type="submit">Set password and sign in</button>
+    </div>
+  </form>
+{% endif %}
+</div>
+{% endblock %}

@@ -9,10 +9,14 @@ import json
 import os
 import shutil
 import sys
+import base64
 import time
 from pathlib import Path
 
 os.environ.setdefault("CF_FAKE_CLAUDE", "1")
+# This suite predates per-user auth and drives the app directly on loopback.
+# auth_smoke_test.py is the one that exercises sign-in and OAuth.
+os.environ.setdefault("CF_REQUIRE_AUTH", "0")
 ROOT = Path(os.environ.setdefault("CF_CONTENT_ROOT", "/tmp/cf-smoke"))
 # Keep the real ~/.config/content-forge/env well clear of the test.
 os.environ.setdefault("CF_TOKEN_FILE", str(ROOT / "token-env"))
@@ -408,56 +412,40 @@ check("delete voice", c.post(f"/voices/{vslug}/delete",
                              follow_redirects=False).status_code == 303
       and not storage.voice_dir(vslug).exists())
 
-print("\n--- access token ---")
-# This gate is only active when CF_ACCESS_TOKEN is set, which the rest of the
-# suite deliberately leaves unset, so it gets its own app instance.
-import base64  # noqa: E402
+print("\n--- authentication ---")
+# Per-user auth is off for the rest of this suite, so the gate gets its own
+# app instance. The full sign-in and OAuth flows are auth_smoke_test.py's job;
+# what is checked here is the route-level shape of the gate.
 import importlib  # noqa: E402
 
-os.environ["CF_ACCESS_TOKEN"] = "s3cret-for-the-test"
+os.environ["CF_REQUIRE_AUTH"] = "1"
+os.environ["CF_PUBLIC_HOST"] = "cf.test"
+os.environ["CF_PUBLIC_PORT"] = "443"
+os.environ["CF_AUTH_DB"] = str(ROOT / "auth-gate.db")
 try:
     import app.config as _cfg
     import app.main as _main
+    import app.mcp_server as _mcps
+    from app import accounts as _acc, oauth_provider as _oap
     importlib.reload(_cfg)
+    importlib.reload(_acc)
+    importlib.reload(_oap)
+    # mcp_server has to be rebuilt too: it decides at import time whether to
+    # wrap /mcp in the SDK's auth middleware, and reloading main alone would
+    # remount the same unauthenticated app.
+    importlib.reload(_mcps)
     _gated = importlib.reload(_main)
+    _oap.init_db()
+    _user = _acc.create_user("tester", password="a-long-test-passphrase")
+    _pat = _acc.create_pat(_user.id, "smoke")
+
     gc = TestClient(_gated.app)
-    b64 = base64.b64encode(b"x:s3cret-for-the-test").decode()
 
-    def status(header=None):
-        h = {"Authorization": header} if header else {}
-        return gc.get("/voices", headers=h).status_code
-
-    # RFC 7235 makes the auth scheme case-insensitive. Matching it exactly
-    # turned a valid credential into a 401 that looked like a bad token.
-    for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
-        check(f"{scheme} accepted", status(f"{scheme} s3cret-for-the-test") == 200)
-    for scheme in ("Basic", "basic", "BASIC"):
-        check(f"{scheme} accepted", status(f"{scheme} {b64}") == 200)
-
-    check("wrong bearer token refused", status("Bearer nope") == 401)
-    check("wrong basic password refused",
-          status("Basic " + base64.b64encode(b"x:nope").decode()) == 401)
-    check("missing header refused", status() == 401)
-    check("scheme with no credentials refused", status("Bearer") == 401
-          and status("Bearer ") == 401)
-    check("unknown scheme refused", status("Token s3cret-for-the-test") == 401)
-    check("bare token without a scheme refused",
-          status("s3cret-for-the-test") == 401)
-    check("malformed base64 refused", status("Basic !!!notb64!!!") == 401)
-    wwwauth = gc.get("/voices").headers.get("www-authenticate", "")
-    check("401 advertises Basic, so a browser still prompts", "Basic" in wwwauth)
-    check("401 also names Bearer, so a token client is not guessing",
-          "Bearer" in wwwauth, wwwauth)
-
-    # An MCP client probes for OAuth metadata before it will talk. 401 there
-    # reads as a broken handshake; 404 correctly says "no OAuth, use your token".
-    for probe in ("/.well-known/oauth-protected-resource",
-                  "/mcp/.well-known/oauth-protected-resource",
-                  "/.well-known/oauth-authorization-server"):
-        check(f"discovery 404s, not 401: {probe}",
-              gc.get(probe).status_code == 404, str(gc.get(probe).status_code))
-    check("well-known exemption leaks nothing else",
-          gc.get("/voices/.well-known/../../voices").status_code in (401, 404))
+    def status(path, header=None, accept="text/html"):
+        h = {"accept": accept}
+        if header:
+            h["Authorization"] = header
+        return gc.get(path, headers=h, follow_redirects=False).status_code
 
     # A hosted connector validates the base URL with no credentials; a 401
     # there stops it registering the server at all. These answer, and carry
@@ -466,27 +454,65 @@ try:
     check("unauthenticated / answers, for connector validation",
           root.status_code == 200, str(root.status_code))
     check("that page leaks no content",
-          "topic" not in root.text.lower() and "voice profile" not in root.text.lower()
-          and "boat" not in root.text.lower(), root.text[:200])
+          "topic" not in root.text.lower() and "boat" not in root.text.lower(),
+          root.text[:200])
     check("unauthenticated /robots.txt answers",
           gc.get("/robots.txt").status_code == 200)
     check("robots asks crawlers to stay out",
           "Disallow: /" in gc.get("/robots.txt").text)
-    # The carve-out must not become a way in.
-    check("POST / still gated", gc.post("/").status_code == 401)
-    for gated in ("/voices", "/topics/x", "/auth", "/mcp"):
-        check(f"{gated} still gated", gc.get(gated).status_code == 401,
-              str(gc.get(gated).status_code))
-    check("authenticated / still serves the real app",
-          "Topics" in gc.get("/", headers={"Authorization":
-                                           "Bearer s3cret-for-the-test"}).text)
     check("/health stays reachable for monitoring",
           gc.get("/health").status_code == 200)
-    check("MCP endpoint is gated too",
-          gc.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
-                                "method": "tools/list"}).status_code == 401)
+
+    # The carve-out must not become a way in.
+    check("POST / still gated",
+          gc.post("/", follow_redirects=False).status_code in (303, 401))
+    for gated in ("/voices", "/topics/x", "/auth"):
+        check(f"{gated} sends a browser to sign in", status(gated) == 303,
+              str(status(gated)))
+    check("an API caller gets 401, not a redirect",
+          status("/voices", accept="application/json") == 401)
+    check("/mcp is gated", gc.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                                 "method": "tools/list"}).status_code == 401)
+
+    # OAuth discovery. This used to answer 404 on purpose — the service had no
+    # OAuth and said so. Now it has one, and a connector that cannot read these
+    # two documents can never onboard itself, so their presence is the thing
+    # most worth asserting in this whole file.
+    for probe in ("/.well-known/oauth-authorization-server",
+                  "/.well-known/oauth-protected-resource/mcp"):
+        r = gc.get(probe)
+        check(f"discovery answers: {probe}", r.status_code == 200,
+              str(r.status_code))
+    meta = gc.get("/.well-known/oauth-authorization-server").json()
+    check("metadata advertises registration, so a connector can self-register",
+          bool(meta.get("registration_endpoint")), str(meta)[:160])
+    check("MCP 401 points at the resource metadata (RFC 9728)",
+          "resource_metadata" in gc.post(
+              "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+          ).headers.get("www-authenticate", ""))
+
+    # RFC 7235 makes the auth scheme case-insensitive. Matching it exactly
+    # turned a valid credential into a 401 that looked like a bad token.
+    for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
+        check(f"{scheme} accepted", status("/voices", f"{scheme} {_pat}") == 200)
+
+    check("wrong bearer token refused", status("/voices", "Bearer nope") == 303)
+    check("scheme with no credentials refused",
+          status("/voices", "Bearer") == 303 and status("/voices", "Bearer ") == 303)
+    check("bare token without a scheme refused", status("/voices", _pat) == 303)
+    check("the old shared-secret Basic form no longer works",
+          status("/voices", "Basic " + base64.b64encode(
+              b"x:" + _pat.encode()).decode()) == 303)
+    check("a revoked token stops working",
+          _acc.revoke_pat(_acc.list_pats(_user.id)[0].id, _user.id)
+          and status("/voices", f"Bearer {_pat}") == 303)
 finally:
-    os.environ.pop("CF_ACCESS_TOKEN", None)
+    for var in ("CF_PUBLIC_HOST", "CF_PUBLIC_PORT", "CF_AUTH_DB"):
+        os.environ.pop(var, None)
+    # Back to the suite's baseline. Popping this instead would leave
+    # REQUIRE_AUTH recomputing to True from the default public hostname, and
+    # every later check would meet a login redirect.
+    os.environ["CF_REQUIRE_AUTH"] = "0"
     importlib.reload(_cfg)
     importlib.reload(_main)
 

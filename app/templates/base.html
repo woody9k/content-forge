@@ -12,10 +12,22 @@
 <header class="topbar">
   <a class="brand" href="/">Content&nbsp;Forge</a>
   <nav>
+  {% if current_user %}
+    <a href="/">Topics</a>
+    <a href="/voices">Voices</a>
+    {% if current_user.is_admin %}<a href="/auth">Auth</a>{% endif %}
+    <a href="/account">{{ current_user.display_name }}</a>
+    <form method="post" action="/logout" class="navform">
+      <button class="linkbtn" type="submit">Sign out</button>
+    </form>
+  {% elif require_auth %}
+    <a href="/login">Sign in</a>
+  {% else %}
     <a href="/">Topics</a>
     <a href="/voices">Voices</a>
     <a href="/auth">Auth</a>
     <a href="/health" target="_blank" rel="noopener">Health</a>
+  {% endif %}
   </nav>
 </header>
 <main>

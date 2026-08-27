@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Account — Content Forge{% endblock %}
+{% block content %}
+<h1>{{ user.display_name }}</h1>
+<p class="sub">{{ user.username }}{% if user.is_admin %} — administrator{% endif %}</p>
+
+{% if created %}
+<div class="banner">
+  <strong>Your new token — copy it now.</strong> It is stored only as a hash,
+  so this is the one and only time it can be shown.
+  <pre class="tokenbox">{{ created }}</pre>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head"><h3>Personal access tokens</h3></div>
+  <p class="hint">For scripts and CLI clients that send a fixed
+    <code>Authorization: Bearer</code> header — including Claude Code:</p>
+  <pre class="tokenbox">claude mcp add --transport http content-forge {{ mcp_url }} --header "Authorization: Bearer &lt;token&gt;" --scope user</pre>
+
+  {% if tokens %}
+  <table class="tokens">
+    <tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>
+    {% for t in tokens %}
+    <tr>
+      <td>{{ t.name }}</td>
+      <td>{{ t.created_at|timestamp }}</td>
+      <td>{{ t.last_used|timestamp if t.last_used else "never" }}</td>
+      <td>
+        <form method="post" action="/account/tokens/{{ t.id }}/delete">
+          <button class="linkbtn danger" type="submit">Revoke</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="empty">No tokens yet.</div>
+  {% endif %}
+
+  <form method="post" action="/account/tokens" class="row">
+    <input name="name" placeholder="What is it for? e.g. laptop" required>
+    <button class="btn" type="submit">Create token</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>Connected applications</h3></div>
+  <p class="hint">Connectors you have approved through OAuth.</p>
+  {% if grants %}
+  <table class="tokens">
+    <tr><th>Application</th><th>Access until</th><th></th></tr>
+    {% for g in grants %}
+    <tr>
+      <td>{{ g.name }}</td>
+      <td>{{ g.expires_at|timestamp }}</td>
+      <td>
+        <form method="post" action="/account/connections/{{ g.client_id }}/delete">
+          <button class="linkbtn danger" type="submit">Disconnect</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="empty">Nothing connected.</div>
+  {% endif %}
+</div>
+{% endblock %}

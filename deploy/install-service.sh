@@ -104,26 +104,14 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   echo "   explicitly unsets it, so the service stays on your subscription." >&2
 fi
 
-# --- access token -----------------------------------------------------------
-# Gates every request (web UI + /mcp) once this instance is reachable from
-# outside the LAN — see app/config.py / app/main.py. Left unset, the app is
-# open exactly as before, so this only matters on a publicly-reachable box.
+# --- accounts ---------------------------------------------------------------
+# The shared CF_ACCESS_TOKEN is gone: authentication is per-user now. Anything
+# left in the env file is ignored, so strip it rather than leaving a dead
+# secret lying about in a 0600 file.
 if [ -f "$ENV_FILE" ] && grep -q '^CF_ACCESS_TOKEN=' "$ENV_FILE"; then
-  echo "==> access token : reusing $ENV_FILE"
-elif [ -n "${CF_ACCESS_TOKEN:-}" ]; then
-  grep -v '^CF_ACCESS_TOKEN=' "$ENV_FILE" > "$ENV_FILE.new" 2>/dev/null || : > "$ENV_FILE.new"
-  printf 'CF_ACCESS_TOKEN=%s\n' "$CF_ACCESS_TOKEN" >> "$ENV_FILE.new"
-  mv "$ENV_FILE.new" "$ENV_FILE"; chmod 600 "$ENV_FILE"
-  echo "==> access token : written to $ENV_FILE (0600), from CF_ACCESS_TOKEN"
-elif [ -n "$PUBLIC_HOST" ]; then
-  GENERATED="$(openssl rand -hex 32)"
-  mkdir -p "$(dirname "$ENV_FILE")"; touch "$ENV_FILE"; chmod 600 "$ENV_FILE"
-  grep -v '^CF_ACCESS_TOKEN=' "$ENV_FILE" > "$ENV_FILE.new" 2>/dev/null || : > "$ENV_FILE.new"
-  printf 'CF_ACCESS_TOKEN=%s\n' "$GENERATED" >> "$ENV_FILE.new"
-  mv "$ENV_FILE.new" "$ENV_FILE"; chmod 600 "$ENV_FILE"
-  echo "==> access token : generated and written to $ENV_FILE (0600)"
-  echo "                   COPY THIS NOW — it is not printed again:"
-  echo "                   $GENERATED"
+  grep -v '^CF_ACCESS_TOKEN=' "$ENV_FILE" > "$ENV_FILE.new" && \
+    mv "$ENV_FILE.new" "$ENV_FILE" && chmod 600 "$ENV_FILE"
+  echo "==> accounts     : removed the obsolete CF_ACCESS_TOKEN from $ENV_FILE"
 fi
 
 # Node installs live outside systemd's default PATH; make sure claude's dir is in.

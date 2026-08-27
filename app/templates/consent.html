@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Authorize — Content Forge{% endblock %}
+{% block content %}
+<div class="authbox">
+{% if expired %}
+  <h1>This request has expired</h1>
+  <p class="sub">Authorization requests are short lived. Start the connection
+    again from the application you were connecting.</p>
+  <p><a class="btn" href="/">Back to Content Forge</a></p>
+{% else %}
+  <h1>Connect {{ pending.client_name }}?</h1>
+  <p class="sub"><strong>{{ pending.client_name }}</strong> is asking to use
+    Content Forge as <strong>{{ current_user.display_name }}</strong>.</p>
+
+  <div class="card">
+    <p>If you approve, it will be able to:</p>
+    <ul>
+      <li>read your topics, voices and articles</li>
+      <li>write new articles, which spends this server's Claude usage</li>
+      <li>create and edit voices</li>
+    </ul>
+    <p class="hint">This is the same access you have in the browser — the
+      workspace is shared, so it is not limited to things you created. You can
+      disconnect it at any time from your <a href="/account">account page</a>.</p>
+  </div>
+
+  <form method="post" action="/consent" class="actions">
+    <input type="hidden" name="req" value="{{ req }}">
+    <button class="btn" type="submit" name="decision" value="approve">Approve</button>
+    <button class="btn ghost" type="submit" name="decision" value="deny">Cancel</button>
+  </form>
+{% endif %}
+</div>
+{% endblock %}

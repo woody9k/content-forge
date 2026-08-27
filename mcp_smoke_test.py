@@ -16,6 +16,9 @@ import threading
 from pathlib import Path
 
 os.environ.setdefault("CF_FAKE_CLAUDE", "1")
+# This suite predates per-user auth and drives the app directly on loopback.
+# auth_smoke_test.py is the one that exercises sign-in and OAuth.
+os.environ.setdefault("CF_REQUIRE_AUTH", "0")
 ROOT = Path(os.environ.setdefault("CF_CONTENT_ROOT", "/tmp/cf-mcp"))
 os.environ.setdefault("CF_TOKEN_FILE", str(ROOT / "token-env"))
 # Deletes are opt-in; the test asserts both halves of that switch.
