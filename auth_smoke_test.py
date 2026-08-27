@@ -75,7 +75,10 @@ def check(label, cond, detail=""):
 # fixtures
 # --------------------------------------------------------------------------
 
-oauth_provider.init_db()
+# Only what ./deploy/add-user.sh does — create the account tables and a user.
+# The OAuth schema is deliberately NOT created here: the app's lifespan owns
+# that, and calling it here would mask a startup path that never ran.
+accounts.init_db()
 alice = accounts.create_user("alice", is_admin=True, password=ALICE_PW)
 bob = accounts.create_user("bob", password=BOB_PW)
 storage.create_topic("Boating", "Boats and water", "")
@@ -128,6 +131,15 @@ async def main():
         r = await c.get(f"{BASE}/voices", headers={"accept": "application/json"})
         check("API caller gets 401 not a redirect", r.status_code == 401,
               r.status_code)
+
+        # An unknown Bearer token has to reach the OAuth tables to be ruled
+        # out. If the app never created them this is a 500, which is exactly
+        # how a lifespan that silently never ran showed up in production.
+        r = await c.get(f"{BASE}/voices",
+                        headers={"accept": "application/json",
+                                 "Authorization": "Bearer not-a-real-token"})
+        check("an unknown bearer token is refused, not a 500",
+              r.status_code == 401, r.status_code)
         check("401 names Bearer",
               "Bearer" in r.headers.get("www-authenticate", ""))
 

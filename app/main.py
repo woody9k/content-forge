@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
@@ -20,7 +21,30 @@ from .mcp_server import lifespan as mcp_lifespan, mount_mcp
 from .render import clean_markdown as _clean_markdown, render_markdown
 from .render import title_from_markdown as _title_from_markdown
 
-app = FastAPI(title="Content Forge", lifespan=mcp_lifespan)
+@asynccontextmanager
+async def _lifespan(app):
+    """Start-up work, then hand off to the MCP session manager.
+
+    This has to be a lifespan rather than a startup event handler: Starlette
+    ignores those entirely once a lifespan is passed to the constructor, and
+    this app has always passed one. Creating the schema there meant it
+    silently never ran, and the first request carrying an unknown token died
+    on "no such table: oauth_access" — a 500 where a 401 belonged.
+    """
+    oauth_provider.init_db()
+    if LEGACY_ACCESS_TOKEN:
+        print("!!  CF_ACCESS_TOKEN is set but no longer used. Authentication "
+              "is per-user now; remove it from the environment and create "
+              "accounts with: ./deploy/add-user.sh <name> --admin")
+    if REQUIRE_AUTH and accounts.count_users() == 0:
+        print("!!  No accounts exist yet, so nobody can sign in. Create the "
+              "first administrator with:\n"
+              "      ./deploy/add-user.sh <name> --admin")
+    async with mcp_lifespan(app):
+        yield
+
+
+app = FastAPI(title="Content Forge", lifespan=_lifespan)
 # Streamable HTTP MCP, same process as the web UI so agent-started generations
 # land in the same job registry the browser polls.
 mount_mcp(app)
@@ -938,14 +962,3 @@ def _mount_oauth() -> None:
 _mount_oauth()
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    oauth_provider.init_db()
-    if LEGACY_ACCESS_TOKEN:
-        print("!!  CF_ACCESS_TOKEN is set but no longer used. Authentication is "
-              "now per-user; remove it from the environment and create "
-              "accounts with: python -m app.accounts add <name> --admin")
-    if REQUIRE_AUTH and accounts.count_users() == 0:
-        print("!!  No accounts exist yet, so nobody can sign in. Create the "
-              "first administrator with:\n"
-              "      python -m app.accounts add <name> --admin")
