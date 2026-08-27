@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import base64
+import hmac
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
+                               RedirectResponse, JSONResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import auth, claude_runner, generate, jobs, storage
-from .config import APP_DIR, CLAUDE_BIN, CLAUDE_MODEL, CONTENT_ROOT
+from .config import ACCESS_TOKEN, APP_DIR, CLAUDE_BIN, CLAUDE_MODEL, CONTENT_ROOT
 from .docx_export import markdown_to_docx
 from .mcp_server import lifespan as mcp_lifespan, mount_mcp
 from .render import clean_markdown as _clean_markdown, render_markdown
@@ -20,6 +23,38 @@ app = FastAPI(title="Content Forge", lifespan=mcp_lifespan)
 mount_mcp(app)
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+
+
+# --------------------------------------------------------------------------
+# access control — a no-op unless CF_ACCESS_TOKEN is set (see config.py)
+# --------------------------------------------------------------------------
+
+def _token_matches(candidate: str) -> bool:
+    return bool(candidate) and hmac.compare_digest(candidate, ACCESS_TOKEN)
+
+
+@app.middleware("http")
+async def require_access_token(request: Request, call_next):
+    if not ACCESS_TOKEN or request.url.path in ("/health",):
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    ok = False
+    if header.startswith("Bearer "):
+        ok = _token_matches(header[len("Bearer "):].strip())
+    elif header.startswith("Basic "):
+        try:
+            _, _, password = base64.b64decode(header[len("Basic "):]).decode(
+                "utf-8", "replace").partition(":")
+        except (ValueError, UnicodeDecodeError):
+            password = ""
+        ok = _token_matches(password)
+
+    if not ok:
+        return PlainTextResponse(
+            "Unauthorized", status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Content Forge"'})
+    return await call_next(request)
 
 
 # --------------------------------------------------------------------------

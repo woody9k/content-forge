@@ -15,3 +15,14 @@ env
 *.credentials.json
 
 .DS_Store
+
+# Claude Code worktree metadata — not part of the project.
+.claude/
+
+# Terraform state and working dirs — local state on purpose (see
+# deploy/terraform/versions.tf), never committed.
+deploy/terraform/.terraform/
+deploy/terraform/terraform.tfstate
+deploy/terraform/terraform.tfstate.*
+deploy/terraform/*.tfvars
+deploy/terraform/*.tfplan
