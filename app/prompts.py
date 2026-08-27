@@ -45,10 +45,60 @@ Output ONLY the Markdown profile. No preamble, no commentary, no code fences.{ex
 ===== END SAMPLES ====="""
 
 
-def article_system(voice_profile: str) -> str:
+WRITING_STYLES: dict[str, str] = {
+    "expository": "Explain clearly and neutrally. Break ideas into their parts, "
+        "define terms before using them, and lead the reader from what they know "
+        "to what they don't. Favour clarity over flourish.",
+    "persuasive": "Build a case. Take a clear position early, back it with "
+        "reasons and evidence in a deliberate order, anticipate the strongest "
+        "counterargument and answer it, and close on the claim. Every section "
+        "should move the reader closer to agreeing.",
+    "descriptive": "Make the reader see, hear and feel it. Favour concrete, "
+        "sensory, specific detail over abstraction — the particular brand, the "
+        "exact sound, the precise gesture — and use it to do the work generic "
+        "adjectives can't.",
+    "narrative": "Tell it as a story with forward motion — a situation, "
+        "complication, and resolution. Use scenes, sequence and, where it fits, "
+        "characters, rather than laying out points in the abstract.",
+    "minimalist": "Cut everything that isn't load-bearing. Short sentences, "
+        "plain words, no throat-clearing, no decorative adjectives. Say the "
+        "thing once, well, and stop.",
+    "lyrical": "Let the prose have music — rhythm, repetition, and figurative "
+        "language earn their place here. Sentence length varies for effect. "
+        "Still say something concrete; don't let the music replace the meaning.",
+    "conversational": "Write like you're talking to one smart friend. "
+        "Contractions, direct address, asides, the occasional rhetorical "
+        "question. Warm and informal without turning sloppy.",
+    "analytical": "Work like an argument built from evidence. Weigh "
+        "alternatives, name trade-offs explicitly, qualify claims to the "
+        "confidence they deserve, and let structure (not adjectives) carry the "
+        "authority.",
+}
+
+
+def article_system(voice_profile: str, styles: list[str] | None = None) -> str:
+    style_block = ""
+    chosen = [s for s in (styles or []) if s in WRITING_STYLES]
+    if chosen:
+        rules = "\n".join(f"- **{s.capitalize()}**: {WRITING_STYLES[s]}" for s in chosen)
+        plural = "these modes" if len(chosen) > 1 else "this mode"
+        style_block = f"""
+
+===== WRITING STYLE FOR THIS PIECE =====
+Independent of voice, this piece should be written in {plural}:
+{rules}
+
+The voice profile (if given below) governs how the author sounds — diction, \
+rhythm, the person behind the words. This style block governs how the piece is \
+built and argued for this particular brief. Satisfy both at once: the author's \
+voice delivered through {plural}.
+===== END WRITING STYLE ====="""
+
     if not voice_profile.strip():
-        return ("You are a professional writer. Write clear, substantive prose with "
+        base = ("You are a professional writer. Write clear, substantive prose with "
                 "no filler and no AI boilerplate.")
+        return base + style_block
+
     return f"""You are ghostwriting as a specific author. The style guide below was \
 derived from their own writing. Follow it as a binding constraint — it outranks \
 your default habits in every case where they conflict. Reproduce their rhythm, \
@@ -56,7 +106,7 @@ diction and structural moves. Do not drift back toward generic assistant prose.
 
 ===== AUTHOR VOICE PROFILE =====
 {voice_profile}
-===== END VOICE PROFILE ====="""
+===== END VOICE PROFILE ====={style_block}"""
 
 
 def article_prompt(*, topic_name: str, topic_desc: str, audience: str,

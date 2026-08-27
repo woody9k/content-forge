@@ -135,33 +135,52 @@ r = c.post("/topics", data={"name": "Youth Sports Parenting",
 check("POST /topics", r.status_code == 303, r.text[:200])
 slug = r.headers["location"].split("/")[-1]
 check("slug generated", slug == "youth-sports-parenting", slug)
-check("topic folders exist",
-      (ROOT / "topics" / slug / "voice" / "samples").is_dir()
-      and (ROOT / "topics" / slug / "articles").is_dir())
-for tab in ("articles", "write", "ideas", "voice", "settings"):
+check("topic folder exists", (ROOT / "topics" / slug / "articles").is_dir())
+check("topic owns no voice folder", not (ROOT / "topics" / slug / "voice").exists())
+for tab in ("articles", "write", "ideas", "settings"):
     check(f"GET topic?tab={tab}", c.get(f"/topics/{slug}?tab={tab}").status_code == 200)
 
-print("\n--- voice ---")
-r = c.post(f"/topics/{slug}/voice/paste",
+print("\n--- voices ---")
+check("GET /voices", c.get("/voices").status_code == 200)
+r = c.post("/voices", data={"name": "Bob", "description": "Blunt, funny, short."},
+           follow_redirects=False)
+check("POST /voices", r.status_code == 303, r.text[:200])
+vslug = r.headers["location"].split("/")[-1]
+check("voice slug generated", vslug == "bob", vslug)
+check("voice folder exists", (ROOT / "voices" / vslug / "samples").is_dir())
+check("voice lives outside topics", not (ROOT / "topics" / slug / "voice").exists())
+
+r = c.post(f"/voices/{vslug}/paste",
            data={"name": "tryouts night", "text": "Sample writing. " * 120},
            follow_redirects=False)
-check("POST voice/paste", r.status_code == 303)
-r = c.post(f"/topics/{slug}/voice/samples",
+check("POST voices/paste", r.status_code == 303)
+r = c.post(f"/voices/{vslug}/samples",
            files=[("files", ("second.md", b"More sample writing. " * 100, "text/markdown"))],
            follow_redirects=False)
-check("POST voice/samples upload", r.status_code == 303)
-check("2 samples on disk", len(storage.list_samples(slug)) == 2)
+check("POST voices/samples upload", r.status_code == 303)
+check("2 samples on disk", len(storage.list_voice_samples(vslug)) == 2)
 
-j = settle(c.post(f"/topics/{slug}/voice/build", data={"notes": "no exclamation marks"},
+j = settle(c.post(f"/voices/{vslug}/build", data={"notes": "no exclamation marks"},
                   follow_redirects=False))
 check("voice build job", j.status == "done", j.error)
-check("profile.md written", storage.profile_path(slug).exists())
+check("profile.md written", storage.voice_profile_path(vslug).exists())
 check("GET job status", c.get(f"/jobs/{j.id}/status").status_code == 200)
 
-r = c.post(f"/topics/{slug}/voice/profile", data={"profile": "## Edited\nhand-tuned"},
+r = c.post(f"/voices/{vslug}/profile", data={"profile": "## Edited\nhand-tuned"},
            follow_redirects=False)
-check("POST voice/profile save", r.status_code == 303
-      and "hand-tuned" in storage.get_voice_profile(slug))
+check("POST voices/profile save", r.status_code == 303
+      and "hand-tuned" in storage.get_voice_profile(vslug))
+
+# a second voice, to prove one topic can draw on many
+r = c.post("/voices", data={"name": "Dana", "description": "Warm and lyrical."},
+           follow_redirects=False)
+vslug2 = r.headers["location"].split("/")[-1]
+storage.save_voice_profile(vslug2, "## Dana\nLyrical and warm.")
+check("second voice created", storage.get_voice(vslug2) is not None)
+check("voices listed together", len(storage.list_voices()) == 2)
+check("both voices offered on the write tab",
+      vslug in c.get(f"/topics/{slug}?tab=write").text
+      and vslug2 in c.get(f"/topics/{slug}?tab=write").text)
 
 print("\n--- ideas ---")
 j = settle(c.post(f"/topics/{slug}/ideas", data={"count": "2", "research": "1"},
@@ -173,7 +192,8 @@ check("ideas render", "Stub idea one" in c.get(f"/topics/{slug}?tab=ideas").text
 print("\n--- articles ---")
 r = c.post(f"/topics/{slug}/articles",
            data={"title": "Why tryouts break kids", "prompt": "Make the case.",
-                 "fmt": "opinion", "words": "800", "references": "1"},
+                 "fmt": "opinion", "words": "800", "references": "1",
+                 "voice": vslug, "styles": ["persuasive", "descriptive"]},
            follow_redirects=False)
 check("POST articles", r.status_code == 303)
 j = settle(r)
@@ -181,6 +201,13 @@ check("article job", j.status == "done", j.error)
 aslug = j.result["article"]
 a = storage.get_article(slug, aslug)
 check("status ready", a.status == "ready", a.status)
+check("voice recorded on the article", a.voice == vslug, a.voice)
+check("styles recorded on the article",
+      a.styles == ["persuasive", "descriptive"], str(a.styles))
+check("unknown voice rejected",
+      c.post(f"/topics/{slug}/articles",
+             data={"title": "x", "prompt": "y", "voice": "ghost"},
+             follow_redirects=False).status_code == 400)
 check("title taken from H1", a.title == "Stub Article", a.title)
 check("body on disk", "stub output" in storage.read_article_body(slug, aslug))
 check("references included", "## References" in storage.read_article_body(slug, aslug))
@@ -198,12 +225,45 @@ check("POST save article", r.status_code == 303)
 check("edit persisted", storage.get_article(slug, aslug).title == "Edited Title")
 
 j = settle(c.post(f"/topics/{slug}/articles/{aslug}/regenerate",
-                  data={"prompt": "different angle", "words": "1200"},
+                  data={"prompt": "different angle", "words": "1200",
+                        "voice": vslug2, "styles": ["narrative"]},
                   follow_redirects=False))
 check("regenerate job", j.status == "done", j.error)
 check("word target updated", storage.get_article(slug, aslug).word_target == 1200)
 check("references off when unchecked",
       storage.get_article(slug, aslug).with_references is False)
+check("voice swapped on rewrite", storage.get_article(slug, aslug).voice == vslug2)
+check("styles swapped on rewrite",
+      storage.get_article(slug, aslug).styles == ["narrative"])
+
+print("\n--- voice + style reach the prompt ---")
+from app import prompts  # noqa: E402
+
+sys_generic = prompts.article_system("", [])
+check("no voice, no style stays generic",
+      "VOICE PROFILE" not in sys_generic and "WRITING STYLE" not in sys_generic)
+
+sys_voice = prompts.article_system("## Bob\nBlunt and short.", [])
+check("voice profile embedded verbatim",
+      "Blunt and short." in sys_voice and "AUTHOR VOICE PROFILE" in sys_voice)
+
+sys_both = prompts.article_system("## Bob\nBlunt and short.",
+                                  ["persuasive", "descriptive"])
+check("both axes present at once",
+      "AUTHOR VOICE PROFILE" in sys_both and "WRITING STYLE" in sys_both
+      and "Persuasive" in sys_both and "Descriptive" in sys_both)
+check("style survives without a voice",
+      "WRITING STYLE" in prompts.article_system("", ["narrative"]))
+check("unknown style ignored",
+      "WRITING STYLE" not in prompts.article_system("", ["nonsense"]))
+
+# the article carries its own voice, and it is that profile that gets loaded
+picked = storage.get_article(slug, aslug)
+check("article names the voice it was last written in", picked.voice == vslug2,
+      picked.voice)
+check("that voice's profile is what generation would load",
+      storage.get_voice_profile(picked.voice).startswith("## Dana"),
+      storage.get_voice_profile(picked.voice)[:40])
 
 print("\n--- exports ---")
 r = c.get(f"/topics/{slug}/articles/{aslug}/export.docx")
@@ -237,16 +297,22 @@ print("\n--- deletes ---")
 check("delete article", c.post(f"/topics/{slug}/articles/{aslug}/delete",
                                follow_redirects=False).status_code == 303
       and not storage.article_dir(slug, aslug).exists())
-check("delete sample", c.post(f"/topics/{slug}/voice/samples/delete",
+check("delete sample", c.post(f"/voices/{vslug}/samples/delete",
                               data={"name": "second.md"},
                               follow_redirects=False).status_code == 303
-      and len(storage.list_samples(slug)) == 1)
+      and len(storage.list_voice_samples(vslug)) == 1)
 check("delete topic", c.post(f"/topics/{slug}/delete",
                              follow_redirects=False).status_code == 303
       and not storage.topic_dir(slug).exists())
+check("voices survive their topic",
+      storage.get_voice(vslug) is not None and storage.get_voice(vslug2) is not None)
+check("delete voice", c.post(f"/voices/{vslug}/delete",
+                             follow_redirects=False).status_code == 303
+      and not storage.voice_dir(vslug).exists())
 
 print("\n--- errors ---")
 check("404 unknown topic", c.get("/topics/nope").status_code == 404)
+check("404 unknown voice", c.get("/voices/nope").status_code == 404)
 check("404 unknown job", c.get("/jobs/deadbeef/wait").status_code == 404)
 
 print()

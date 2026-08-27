@@ -14,7 +14,7 @@ from .render import clean_markdown, title_from_markdown
 
 
 def generate_article(topic: storage.Topic, article: storage.Article) -> dict:
-    voice = storage.get_voice_profile(topic.slug)
+    voice = storage.get_voice_profile(article.voice) if article.voice else ""
     prior = [a.title for a in storage.list_articles(topic.slug)
              if a.slug != article.slug and a.status == "ready"]
     prompt = prompts.article_prompt(
@@ -24,7 +24,7 @@ def generate_article(topic: storage.Topic, article: storage.Article) -> dict:
         with_references=article.with_references, prior_titles=prior,
     )
     try:
-        res = claude_runner.run(prompt, system=prompts.article_system(voice),
+        res = claude_runner.run(prompt, system=prompts.article_system(voice, article.styles),
                                 use_tools=article.with_references)
     except Exception as exc:
         article.status = "error"
@@ -47,19 +47,19 @@ def generate_article(topic: storage.Topic, article: storage.Article) -> dict:
             "cost": res.cost_usd, "duration": res.duration_s}
 
 
-def build_voice(topic: storage.Topic, notes: str) -> dict:
-    samples = storage.collect_samples_text(topic.slug)
+def build_voice(voice: storage.Voice, notes: str) -> dict:
+    samples = storage.collect_voice_samples_text(voice.slug)
     if len(samples) < 400:
         raise RuntimeError(
             "Not enough sample material. Upload at least a few hundred words "
-            "of your own writing for this topic first."
+            "of the author's own writing for this voice first."
         )
     res = claude_runner.run(
-        prompts.voice_profile_prompt(topic.name, samples, notes),
+        prompts.voice_profile_prompt(voice.name, samples, notes),
         system=prompts.VOICE_SYSTEM, use_tools=False,
     )
-    storage.save_voice_profile(topic.slug, clean_markdown(res.text))
-    return {"topic": topic.slug, "chars": len(samples), "cost": res.cost_usd}
+    storage.save_voice_profile(voice.slug, clean_markdown(res.text))
+    return {"voice": voice.slug, "chars": len(samples), "cost": res.cost_usd}
 
 
 def suggest_ideas(topic: storage.Topic, count: int, research: bool) -> dict:

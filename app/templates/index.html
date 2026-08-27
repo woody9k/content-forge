@@ -9,7 +9,9 @@
 {% endif %}
 
 <h1>Topics</h1>
-<p class="sub">Each topic is a folder: its own voice profile, its own articles, its own idea list.</p>
+<p class="sub">A topic is a subject area with its own articles and idea list.
+  <a href="/voices">Voices</a> are separate — build one from writing samples, then
+  apply it to any article here.</p>
 
 {% if active_jobs %}
 <div class="banner">
@@ -27,12 +29,6 @@
     <p>{{ t.description or "No description." }}</p>
     <div class="pills">
       <span class="pill">{{ t.article_count }} article{{ "s" if t.article_count != 1 }}</span>
-      {% if t.has_voice %}
-        <span class="pill ok">voice ready</span>
-      {% else %}
-        <span class="pill grey">no voice yet</span>
-      {% endif %}
-      <span class="pill grey">{{ t.sample_count }} sample{{ "s" if t.sample_count != 1 }}</span>
     </div>
   </a>
   {% endfor %}

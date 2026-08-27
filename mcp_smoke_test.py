@@ -72,8 +72,15 @@ async def main():
             check("instructions advertised", bool(init.instructions))
 
             tools = {t.name: t for t in (await s.list_tools()).tools}
-            check("tools listed", len(tools) >= 17, str(len(tools)))
+            check("tools listed", len(tools) >= 20, str(len(tools)))
             check("delete tools gated on", "content_forge_delete_topic" in tools)
+            check("voice tools registered",
+                  {"content_forge_list_voices", "content_forge_create_voice",
+                   "content_forge_delete_voice",
+                   "content_forge_list_writing_styles"} <= tools.keys())
+            wa = tools["content_forge_write_article"].inputSchema["properties"]
+            check("write_article exposes all three axes",
+                  {"topic", "voice", "styles"} <= wa.keys(), str(sorted(wa)))
             check("every tool documented",
                   all(t.description and len(t.description) > 60
                       for t in tools.values()),
@@ -112,14 +119,27 @@ async def main():
             check("unknown topic is an actionable error",
                   r.isError and "boat-life" in text_of(r), text_of(r)[:160])
 
-            # ---------------- voice ----------------
+            # ---------------- voices ----------------
+            r = await s.call_tool("content_forge_create_voice", {
+                "name": "Bob", "description": "Blunt, funny, short sentences."})
+            bob = json.loads(text_of(r))
+            check("create_voice", bob["slug"] == "bob", str(bob))
+            check("new voice has no profile", bob["has_profile"] is False)
+
             r = await s.call_tool("content_forge_add_voice_sample", {
-                "topic": "boat-life", "text": "Sample writing about docks. " * 40,
+                "voice": "bob", "text": "Sample writing about docks. " * 40,
                 "name": "dock notes"})
             check("add_voice_sample", json.loads(text_of(r))["total_samples"] == 1)
 
+            # a voice with no profile cannot be applied
+            r = await s.call_tool("content_forge_write_article", {
+                "topic": "boat-life", "title": "Too early", "voice": "bob"})
+            check("unbuilt voice refused with a fix",
+                  r.isError and "content_forge_build_voice_profile" in text_of(r),
+                  text_of(r)[:160])
+
             r = await s.call_tool("content_forge_build_voice_profile",
-                                  {"topic": "boat-life"})
+                                  {"voice": "bob"})
             job = json.loads(text_of(r))
             check("build_voice_profile returns a job", bool(job["job_id"]), str(job))
 
@@ -129,19 +149,55 @@ async def main():
             check("voice job completes", done["status"] == "done", str(done))
 
             r = await s.call_tool("content_forge_get_voice_profile",
-                                  {"topic": "boat-life"})
+                                  {"voice": "bob"})
             check("voice profile readable",
                   json.loads(text_of(r))["has_profile"] is True)
 
+            r = await s.call_tool("content_forge_list_voices", {})
+            check("list_voices finds it", json.loads(text_of(r))["total"] == 1)
+            r = await s.call_tool("content_forge_list_voices",
+                                  {"response_format": "markdown"})
+            check("voices markdown format", "`bob`" in text_of(r))
+
+            # a voice is not owned by a topic — it works from any of them
+            r = await s.call_tool("content_forge_create_topic",
+                                  {"name": "Gardening"})
+            check("second topic", json.loads(text_of(r))["slug"] == "gardening")
+
+            r = await s.call_tool("content_forge_list_writing_styles", {})
+            st_keys = [x["key"] for x in json.loads(text_of(r))["styles"]]
+            check("writing styles discoverable",
+                  "persuasive" in st_keys and "descriptive" in st_keys, str(st_keys))
+
             # ---------------- articles ----------------
+            # the headline flow: a named voice + a named style in a named topic
             r = await s.call_tool("content_forge_write_article", {
                 "topic": "boat-life", "title": "Choosing a dock ladder",
                 "brief": "Compare the options.", "format": "how-to",
-                "words": 800, "references": True})
+                "words": 800, "references": True,
+                "voice": "bob", "styles": ["persuasive", "descriptive"]})
             started = json.loads(text_of(r))
             check("write_article returns job and slug",
                   started["job_id"] and started["article"], str(started))
+            check("write_article echoes voice and styles",
+                  started["voice"] == "bob"
+                  and started["styles"] == ["persuasive", "descriptive"],
+                  str(started))
             aslug = started["article"]
+
+            # display names resolve, so "the Bob voice in the Gardening topic" works
+            r = await s.call_tool("content_forge_write_article", {
+                "topic": "Gardening", "title": "Raised beds",
+                "voice": "Bob", "styles": ["narrative"]})
+            byname = json.loads(text_of(r))
+            check("names resolve to slugs",
+                  byname["topic"] == "gardening" and byname["voice"] == "bob",
+                  str(byname))
+            check("one voice serves many topics",
+                  byname["voice"] == started["voice"]
+                  and byname["topic"] != started["topic"])
+            await s.call_tool("content_forge_get_job",
+                              {"job_id": byname["job_id"], "wait_seconds": 20})
 
             r = await s.call_tool("content_forge_get_job",
                                   {"job_id": started["job_id"], "wait_seconds": 25})
@@ -169,6 +225,22 @@ async def main():
             check("get_article json has metadata",
                   meta["status"] == "ready" and meta["words"] > 0
                   and meta["has_references_section"] is True, str(meta)[:200])
+            check("article metadata carries voice and styles",
+                  meta["voice"] == "bob"
+                  and meta["styles"] == ["persuasive", "descriptive"], str(meta)[:200])
+
+            # re-cut the same piece in a different voice, leaving styles alone
+            r = await s.call_tool("content_forge_create_voice", {"name": "Dana"})
+            await s.call_tool("content_forge_set_voice_profile",
+                              {"voice": "dana", "profile": "## Dana\nWarm, lyrical."})
+            r = await s.call_tool("content_forge_rewrite_article", {
+                "topic": "boat-life", "article": aslug, "voice": "dana"})
+            recut = json.loads(text_of(r))
+            check("rewrite swaps voice, inherits styles",
+                  recut["voice"] == "dana"
+                  and recut["styles"] == ["persuasive", "descriptive"], str(recut))
+            await s.call_tool("content_forge_get_job",
+                              {"job_id": recut["job_id"], "wait_seconds": 25})
 
             r = await s.call_tool("content_forge_list_articles",
                                   {"topic": "boat-life", "status": "ready"})
@@ -207,7 +279,9 @@ async def main():
             # ---------------- health and errors ----------------
             r = await s.call_tool("content_forge_health", {})
             h = json.loads(text_of(r))
-            check("health", h["ok"] is True and h["topics"] == 1, str(h)[:200])
+            check("health", h["ok"] is True and h["topics"] == 2, str(h)[:200])
+            check("health counts voices",
+                  h["voices"] == 2 and h["voices_ready"] == 2, str(h)[:200])
 
             r = await s.call_tool("content_forge_get_job", {"job_id": "deadbeef"})
             check("unknown job is an actionable error",
@@ -223,12 +297,22 @@ async def main():
                                   {"topic": "boat-life", "title": "x", "words": 99})
             check("out-of-range input rejected", r.isError, text_of(r)[:160])
 
+            r = await s.call_tool("content_forge_get_voice_profile",
+                                  {"voice": "ghost"})
+            check("unknown voice names the known ones",
+                  r.isError and "bob" in text_of(r), text_of(r)[:160])
+
             # ---------------- deletes ----------------
             r = await s.call_tool("content_forge_delete_article",
                                   {"topic": "boat-life", "article": aslug})
             check("delete_article", json.loads(text_of(r))["deleted"] is True)
             r = await s.call_tool("content_forge_delete_topic", {"topic": "boat-life"})
             check("delete_topic", json.loads(text_of(r))["deleted"] is True)
+            r = await s.call_tool("content_forge_list_voices", {})
+            check("voices outlive a deleted topic",
+                  json.loads(text_of(r))["total"] == 2, text_of(r)[:200])
+            r = await s.call_tool("content_forge_delete_voice", {"voice": "bob"})
+            check("delete_voice", json.loads(text_of(r))["deleted"] is True)
 
     server.should_exit = True
 
