@@ -142,7 +142,9 @@ def _render(request: Request, name: str, **ctx) -> HTMLResponse:
     ctx["request"] = request
     ctx.setdefault("model", CLAUDE_MODEL)
     ctx.setdefault("content_root", str(CONTENT_ROOT))
-    return templates.TemplateResponse(name, ctx)
+    # Starlette 1.x takes the request first; the old (name, context) form,
+    # where the request rode inside the context, was removed.
+    return templates.TemplateResponse(request, name, ctx)
 
 
 # --------------------------------------------------------------------------

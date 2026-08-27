@@ -25,7 +25,7 @@ if ROOT.exists():
 
 import uvicorn  # noqa: E402
 from mcp import ClientSession  # noqa: E402
-from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
+from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 
 from app.main import app  # noqa: E402
 
@@ -64,11 +64,12 @@ async def main():
     check("server started", server.started)
 
     url = f"http://127.0.0.1:{PORT}/mcp"
-    async with streamablehttp_client(url) as (read, write, _):
+    # SDK 2.x yields just (read, write); the session-id callback is gone.
+    async with streamable_http_client(url) as (read, write):
         async with ClientSession(read, write) as s:
             init = await s.initialize()
-            check("initialize", init.serverInfo.name == "content_forge_mcp",
-                  init.serverInfo.name)
+            check("initialize", init.server_info.name == "content_forge_mcp",
+                  init.server_info.name)
             check("instructions advertised", bool(init.instructions))
 
             tools = {t.name: t for t in (await s.list_tools()).tools}
@@ -79,7 +80,7 @@ async def main():
                    "content_forge_delete_voice",
                    "content_forge_list_writing_styles",
                    "content_forge_update_voice"} <= tools.keys())
-            wa = tools["content_forge_write_article"].inputSchema["properties"]
+            wa = tools["content_forge_write_article"].input_schema["properties"]
             check("write_article exposes all three axes",
                   {"topic", "voice", "styles"} <= wa.keys(), str(sorted(wa)))
             check("every tool documented",
@@ -91,13 +92,13 @@ async def main():
                   all(t.annotations and t.annotations.title
                       for t in tools.values()))
             check("read tools flagged read-only",
-                  tools["content_forge_list_topics"].annotations.readOnlyHint
+                  tools["content_forge_list_topics"].annotations.read_only_hint
                   is True)
             check("destructive tools flagged",
-                  tools["content_forge_delete_topic"].annotations.destructiveHint
+                  tools["content_forge_delete_topic"].annotations.destructive_hint
                   is True)
             check("schemas name their params",
-                  "topic" in tools["content_forge_get_article"].inputSchema["properties"])
+                  "topic" in tools["content_forge_get_article"].input_schema["properties"])
 
             # Anthropic accepts nullable unions; OpenAI's strict function
             # schemas reject them, and a client that validates the whole
@@ -107,7 +108,7 @@ async def main():
             name_re = _re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
             offenders = {"anyOf": [], "null": [], "name": [], "desc": []}
             for n, t in tools.items():
-                schema = json.dumps(t.inputSchema)
+                schema = json.dumps(t.input_schema)
                 if '"anyOf"' in schema:
                     offenders["anyOf"].append(n)
                 if '"null"' in schema:
@@ -144,7 +145,7 @@ async def main():
 
             r = await s.call_tool("content_forge_get_topic", {"topic": "nope"})
             check("unknown topic is an actionable error",
-                  r.isError and "boat-life" in text_of(r), text_of(r)[:160])
+                  r.is_error and "boat-life" in text_of(r), text_of(r)[:160])
 
             # ---------------- voices ----------------
             r = await s.call_tool("content_forge_create_voice", {
@@ -162,7 +163,7 @@ async def main():
             r = await s.call_tool("content_forge_write_article", {
                 "topic": "boat-life", "title": "Too early", "voice": "bob"})
             check("unbuilt voice refused with a fix",
-                  r.isError and "content_forge_build_voice_profile" in text_of(r),
+                  r.is_error and "content_forge_build_voice_profile" in text_of(r),
                   text_of(r)[:160])
 
             r = await s.call_tool("content_forge_build_voice_profile",
@@ -199,7 +200,7 @@ async def main():
                   json.loads(text_of(r))["description"] == "Blunt.", text_of(r)[:160])
             r = await s.call_tool("content_forge_update_voice", {"voice": "bob"})
             check("update_voice with nothing to do is an error",
-                  r.isError and "name" in text_of(r), text_of(r)[:160])
+                  r.is_error and "name" in text_of(r), text_of(r)[:160])
             await s.call_tool("content_forge_update_voice",
                               {"voice": "bob", "name": "Bob"})
             r = await s.call_tool("content_forge_list_voices",
@@ -332,22 +333,22 @@ async def main():
 
             r = await s.call_tool("content_forge_get_job", {"job_id": "deadbeef"})
             check("unknown job is an actionable error",
-                  r.isError and "content_forge_list_articles" in text_of(r),
+                  r.is_error and "content_forge_list_articles" in text_of(r),
                   text_of(r)[:160])
 
             r = await s.call_tool("content_forge_get_article",
                                   {"topic": "boat-life", "article": "ghost"})
             check("unknown article names the known ones",
-                  r.isError and aslug in text_of(r), text_of(r)[:160])
+                  r.is_error and aslug in text_of(r), text_of(r)[:160])
 
             r = await s.call_tool("content_forge_write_article",
                                   {"topic": "boat-life", "title": "x", "words": 99})
-            check("out-of-range input rejected", r.isError, text_of(r)[:160])
+            check("out-of-range input rejected", r.is_error, text_of(r)[:160])
 
             r = await s.call_tool("content_forge_get_voice_profile",
                                   {"voice": "ghost"})
             check("unknown voice names the known ones",
-                  r.isError and "bob" in text_of(r), text_of(r)[:160])
+                  r.is_error and "bob" in text_of(r), text_of(r)[:160])
 
             # ---------------- deletes ----------------
             r = await s.call_tool("content_forge_delete_article",
@@ -360,6 +361,41 @@ async def main():
                   json.loads(text_of(r))["total"] == 2, text_of(r)[:200])
             r = await s.call_tool("content_forge_delete_voice", {"voice": "bob"})
             check("delete_voice", json.loads(text_of(r))["deleted"] is True)
+
+    # ---------------- modern protocol era (2026-07-28) ----------------
+    # The SDK client above speaks the legacy initialize handshake. A modern
+    # client sends no handshake at all: version and capabilities ride in
+    # params._meta, mirrored into headers. This is what a 2026-07-28 client
+    # does, and it is the era an OpenAI-style client is built against.
+    import httpx2  # noqa: E402
+    META = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}}
+
+    async def modern(method, params=None, name=None):
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream",
+                   "MCP-Protocol-Version": "2026-07-28",
+                   "MCP-Method": method}
+        if name:
+            headers["MCP-Name"] = name
+        body = {"jsonrpc": "2.0", "id": 1, "method": method,
+                "params": {**(params or {}), "_meta": META}}
+        async with httpx2.AsyncClient() as hc:
+            r = await hc.post(url, headers=headers, json=body, timeout=20)
+            return r.json()
+
+    d = await modern("server/discover")
+    check("modern: server/discover answers (a MUST in this era)",
+          "result" in d and "capabilities" in d["result"], str(d)[:200])
+    d = await modern("tools/list")
+    check("modern: tools/list without any initialize handshake",
+          "result" in d and len(d["result"]["tools"]) >= 21, str(d)[:200])
+    d = await modern("tools/call",
+                     {"name": "content_forge_health", "arguments": {}},
+                     name="content_forge_health")
+    check("modern: tools/call round-trips",
+          "result" in d and json.loads(
+              d["result"]["content"][0]["text"])["ok"] is True, str(d)[:200])
 
     server.should_exit = True
 
