@@ -1,0 +1,49 @@
+name: Start content-forge instance
+
+# Manual counterpart to stop-content-forge.yml. Run this (Actions tab ->
+# Run workflow) when you actually want claude.ai/ChatGPT/the web UI to be
+# able to reach the box. Not scheduled by default — add a `schedule:`
+# trigger here if you settle into a predictable usage window.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stop-content-forge # shares the group with the stop workflow so they can't race
+  cancel-in-progress: false
+
+env:
+  INSTANCE_ID: i-0e009f82bcc58d0dc
+
+jobs:
+  start:
+    name: Start content-forge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Check current state
+        id: state
+        run: |
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].State.Name' --output text)
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "content-forge ($INSTANCE_ID) is currently: $STATE"
+
+      - name: Start instance
+        if: steps.state.outputs.state == 'stopped'
+        run: |
+          aws ec2 start-instances --instance-ids "$INSTANCE_ID"
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+          echo "::notice::Started content-forge ($INSTANCE_ID) — systemd + nginx come back on their own"
+
+      - name: Already running
+        if: steps.state.outputs.state != 'stopped'
+        run: echo "::notice::No action - state is '${{ steps.state.outputs.state }}'"

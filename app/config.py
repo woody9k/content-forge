@@ -53,6 +53,14 @@ ALLOWED_TOOLS = os.environ.get("CF_ALLOWED_TOOLS", "WebSearch WebFetch")
 PUBLIC_HOST = os.environ.get("CF_PUBLIC_HOST", "contentforge.boblab.net")
 PUBLIC_PORT = os.environ.get("CF_PUBLIC_PORT", "8443")
 
+# Shared secret gating every request (web UI and MCP alike) when this instance
+# is reachable from the public internet — LAN-only deployments have no reason
+# to set it, so an empty value leaves the app open exactly as before. Accepted
+# either as `Authorization: Bearer <token>` (what a connector's custom-header
+# config expects) or HTTP Basic with the token as the password (so a browser
+# just gets a login prompt once and caches it).
+ACCESS_TOKEN = os.environ.get("CF_ACCESS_TOKEN", "").strip()
+
 
 _LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
 

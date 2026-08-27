@@ -1,0 +1,57 @@
+name: Stop content-forge instance (nightly)
+
+# Cost guard, same idea as tassels-node's stop-dev-instance.yml. The box
+# only needs to be up while you actually want claude.ai/ChatGPT to be able
+# to reach it — not 24/7. Deliberately unconditional: a stopped box that
+# was mid-use is cheaper than a forgotten running one. Root volume + EIP
+# persist across stop/start.
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC — adjust to taste
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you stopping it early?"
+        required: false
+        default: "manual"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stop-content-forge
+  cancel-in-progress: false
+
+env:
+  INSTANCE_ID: i-0e009f82bcc58d0dc
+
+jobs:
+  stop:
+    name: Stop content-forge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Check current state
+        id: state
+        run: |
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].State.Name' --output text)
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "content-forge ($INSTANCE_ID) is currently: $STATE"
+
+      - name: Stop instance
+        if: steps.state.outputs.state == 'running'
+        run: |
+          aws ec2 stop-instances --instance-ids "$INSTANCE_ID"
+          aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
+          echo "::notice::Stopped content-forge ($INSTANCE_ID)"
+
+      - name: Already stopped
+        if: steps.state.outputs.state != 'running'
+        run: echo "::notice::No action - state is '${{ steps.state.outputs.state }}'"
