@@ -2,19 +2,27 @@
 
 Layout under CONTENT_ROOT:
 
+    voices/
+      <voice-slug>/
+        voice.json              name, description, timestamps
+        samples/                raw writing samples the user drops in
+          *.md *.txt *.docx
+        profile.md              generated style guide for this voice
+
     topics/
       <topic-slug>/
-        topic.json              name, description, timestamps
-        voice/
-          samples/              raw writing samples the user drops in
-            *.md *.txt *.docx
-          profile.md            generated voice profile for this topic
+        topic.json              name, description, audience, timestamps
         ideas.json              cached topic suggestions
         articles/
           <article-slug>/
             article.md          the article body (markdown)
-            meta.json           title, prompt, status, timestamps, references
+            meta.json           title, prompt, status, voice slug, styles,
+                                 timestamps, references
             export.docx         generated on demand
+
+A voice is independent of topic: build it once from writing samples, then
+apply it to any article in any topic. An article picks a voice (or none, for
+a generic tone) and a set of writing-style modes at creation time.
 """
 from __future__ import annotations
 
@@ -58,8 +66,23 @@ def _write_json(path: Path, data: Any) -> None:
     tmp.replace(path)
 
 
+def read_sample(path: Path) -> str:
+    """Plain text out of a sample file, .docx included."""
+    if path.suffix.lower() == ".docx":
+        try:
+            import docx  # type: ignore
+            doc = docx.Document(str(path))
+            return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception:
+            return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 # --------------------------------------------------------------------------
-# paths
+# paths — topics
 # --------------------------------------------------------------------------
 
 def topics_root() -> Path:
@@ -72,24 +95,34 @@ def topic_dir(slug: str) -> Path:
     return topics_root() / slug
 
 
-def voice_dir(slug: str) -> Path:
-    return topic_dir(slug) / "voice"
-
-
-def samples_dir(slug: str) -> Path:
-    return voice_dir(slug) / "samples"
-
-
-def profile_path(slug: str) -> Path:
-    return voice_dir(slug) / "profile.md"
-
-
 def articles_dir(slug: str) -> Path:
     return topic_dir(slug) / "articles"
 
 
 def article_dir(topic: str, article: str) -> Path:
     return articles_dir(topic) / article
+
+
+# --------------------------------------------------------------------------
+# paths — voices
+# --------------------------------------------------------------------------
+
+def voices_root() -> Path:
+    p = CONTENT_ROOT / "voices"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def voice_dir(slug: str) -> Path:
+    return voices_root() / slug
+
+
+def voice_samples_dir(slug: str) -> Path:
+    return voice_dir(slug) / "samples"
+
+
+def voice_profile_path(slug: str) -> Path:
+    return voice_dir(slug) / "profile.md"
 
 
 # --------------------------------------------------------------------------
@@ -106,22 +139,31 @@ class Topic:
     updated_at: str = field(default_factory=now_iso)
 
     @property
-    def has_voice(self) -> bool:
-        return profile_path(self.slug).exists()
-
-    @property
-    def sample_count(self) -> int:
-        d = samples_dir(self.slug)
-        if not d.exists():
-            return 0
-        return len([f for f in d.iterdir() if f.suffix.lower() in SAMPLE_SUFFIXES])
-
-    @property
     def article_count(self) -> int:
         d = articles_dir(self.slug)
         if not d.exists():
             return 0
         return len([f for f in d.iterdir() if f.is_dir()])
+
+
+@dataclass
+class Voice:
+    slug: str
+    name: str
+    description: str = ""
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+    @property
+    def has_profile(self) -> bool:
+        return voice_profile_path(self.slug).exists()
+
+    @property
+    def sample_count(self) -> int:
+        d = voice_samples_dir(self.slug)
+        if not d.exists():
+            return 0
+        return len([f for f in d.iterdir() if f.suffix.lower() in SAMPLE_SUFFIXES])
 
 
 @dataclass
@@ -134,6 +176,8 @@ class Article:
     with_references: bool = False
     word_target: int = 900
     format: str = "blog post"
+    voice: str = ""                 # voice slug, or "" for a generic tone
+    styles: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     error: str = ""
@@ -157,7 +201,6 @@ def create_topic(name: str, description: str = "", audience: str = "") -> Topic:
             n += 1
         slug = f"{slug}-{n}"
         d = topic_dir(slug)
-    (d / "voice" / "samples").mkdir(parents=True, exist_ok=True)
     (d / "articles").mkdir(parents=True, exist_ok=True)
     t = Topic(slug=slug, name=name.strip(), description=description.strip(),
               audience=audience.strip())
@@ -209,11 +252,68 @@ def delete_topic(slug: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# voice
+# voices
 # --------------------------------------------------------------------------
 
-def list_samples(topic: str) -> list[dict]:
-    d = samples_dir(topic)
+def create_voice(name: str, description: str = "") -> Voice:
+    slug = slugify(name, "voice")
+    d = voice_dir(slug)
+    if d.exists():
+        n = 2
+        while voice_dir(f"{slug}-{n}").exists():
+            n += 1
+        slug = f"{slug}-{n}"
+        d = voice_dir(slug)
+    (d / "samples").mkdir(parents=True, exist_ok=True)
+    v = Voice(slug=slug, name=name.strip(), description=description.strip())
+    _write_json(d / "voice.json", asdict(v))
+    return v
+
+
+def get_voice(slug: str) -> Voice | None:
+    f = voice_dir(slug) / "voice.json"
+    if not f.exists():
+        return None
+    data = _read_json(f, None)
+    if not data:
+        return None
+    return Voice(**{k: v for k, v in data.items()
+                    if k in Voice.__dataclass_fields__})
+
+
+def update_voice(slug: str, **changes) -> Voice | None:
+    v = get_voice(slug)
+    if not v:
+        return None
+    for k, val in changes.items():
+        if k in Voice.__dataclass_fields__ and k not in ("slug", "created_at"):
+            setattr(v, k, val)
+    v.updated_at = now_iso()
+    _write_json(voice_dir(slug) / "voice.json", asdict(v))
+    return v
+
+
+def list_voices() -> list[Voice]:
+    out = []
+    for d in sorted(voices_root().iterdir()):
+        if d.is_dir():
+            v = get_voice(d.name)
+            if v:
+                out.append(v)
+    out.sort(key=lambda v: v.name.lower())
+    return out
+
+
+def delete_voice(slug: str) -> bool:
+    d = voice_dir(slug)
+    if not d.exists():
+        return False
+    shutil.rmtree(d)
+    return True
+
+
+def list_voice_samples(voice: str) -> list[dict]:
+    d = voice_samples_dir(voice)
     if not d.exists():
         return []
     out = []
@@ -224,23 +324,8 @@ def list_samples(topic: str) -> list[dict]:
     return out
 
 
-def read_sample(path: Path) -> str:
-    """Plain text out of a sample file, .docx included."""
-    if path.suffix.lower() == ".docx":
-        try:
-            import docx  # type: ignore
-            doc = docx.Document(str(path))
-            return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        except Exception:
-            return ""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def save_sample(topic: str, filename: str, data: bytes) -> str:
-    d = samples_dir(topic)
+def save_voice_sample(voice: str, filename: str, data: bytes) -> str:
+    d = voice_samples_dir(voice)
     d.mkdir(parents=True, exist_ok=True)
     safe = Path(filename).name
     if Path(safe).suffix.lower() not in SAMPLE_SUFFIXES:
@@ -254,18 +339,18 @@ def save_sample(topic: str, filename: str, data: bytes) -> str:
     return dest.name
 
 
-def delete_sample(topic: str, name: str) -> bool:
-    f = samples_dir(topic) / Path(name).name
+def delete_voice_sample(voice: str, name: str) -> bool:
+    f = voice_samples_dir(voice) / Path(name).name
     if f.exists() and f.is_file():
         f.unlink()
         return True
     return False
 
 
-def collect_samples_text(topic: str, max_chars: int = 60_000) -> str:
+def collect_voice_samples_text(voice: str, max_chars: int = 60_000) -> str:
     """Concatenate every sample, capped so the prompt stays sane."""
     parts, total = [], 0
-    for f in sorted(samples_dir(topic).glob("*")):
+    for f in sorted(voice_samples_dir(voice).glob("*")):
         if f.suffix.lower() not in SAMPLE_SUFFIXES:
             continue
         text = read_sample(f).strip()
@@ -281,13 +366,13 @@ def collect_samples_text(topic: str, max_chars: int = 60_000) -> str:
     return "".join(parts).strip()
 
 
-def get_voice_profile(topic: str) -> str:
-    p = profile_path(topic)
+def get_voice_profile(voice: str) -> str:
+    p = voice_profile_path(voice)
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def save_voice_profile(topic: str, text: str) -> None:
-    p = profile_path(topic)
+def save_voice_profile(voice: str, text: str) -> None:
+    p = voice_profile_path(voice)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
 
@@ -298,7 +383,8 @@ def save_voice_profile(topic: str, text: str) -> None:
 
 def create_article(topic: str, title: str, prompt: str, *,
                    with_references: bool = False, word_target: int = 900,
-                   fmt: str = "blog post") -> Article:
+                   fmt: str = "blog post", voice: str = "",
+                   styles: list[str] | None = None) -> Article:
     slug = slugify(title, "article")
     d = article_dir(topic, slug)
     if d.exists():
@@ -309,7 +395,8 @@ def create_article(topic: str, title: str, prompt: str, *,
         d = article_dir(topic, slug)
     d.mkdir(parents=True, exist_ok=True)
     a = Article(slug=slug, topic=topic, title=title.strip(), prompt=prompt.strip(),
-                with_references=with_references, word_target=word_target, format=fmt)
+                with_references=with_references, word_target=word_target, format=fmt,
+                voice=voice, styles=styles or [])
     _write_json(d / "meta.json", asdict(a))
     (d / "article.md").write_text("", encoding="utf-8")
     return a

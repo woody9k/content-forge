@@ -14,14 +14,30 @@ Agent ────MCP───>      │  /mcp           │
 
 ## What it does
 
-- **Topics** — each is a folder with its own voice profile, articles and idea list.
-- **Voice** — drop in samples of your own writing (`.md` `.txt` `.docx`, or paste);
-  Claude extracts a style guide that becomes a binding system prompt for every
-  article in that topic. The profile is a plain Markdown file you can hand-edit,
-  which is the single biggest lever on output quality.
-- **Write** — a title plus a brief becomes an article. Tick *Research and cite
-  sources* and the agent runs real web searches and appends a numbered
-  `## References` section with live URLs.
+Every article is the combination of three **independent** things:
+
+| | What it decides | Scope |
+|---|---|---|
+| **Topic** | the subject area | owns articles and ideas |
+| **Voice** | who it sounds like | reusable across every topic |
+| **Style** | how it is built and argued | chosen per article, combinable |
+
+So you can pre-build a *Bob* voice and a *Dana* voice, then write one boating
+article persuasively as Bob and the next one lyrically as Dana.
+
+- **Topics** — each is a folder with its own articles and idea list.
+- **Voices** — a separate folder per voice. Drop in samples of someone's writing
+  (`.md` `.txt` `.docx`, or paste); Claude extracts a style guide that becomes a
+  binding system prompt for any article you apply it to. The profile is a plain
+  Markdown file you can hand-edit, which is the single biggest lever on output
+  quality.
+- **Styles** — expository, persuasive, descriptive, narrative, minimalist,
+  lyrical, conversational, analytical. Layered on top of the voice: the voice
+  governs the diction and rhythm, the style governs the argument and structure.
+  Combine as many as you like.
+- **Write** — a title plus a brief becomes an article. Pick a voice and any
+  styles. Tick *Research and cite sources* and the agent runs real web searches
+  and appends a numbered `## References` section with live URLs.
 - **Ideas** — ask for N article suggestions for a topic; anything already covered
   by existing articles is excluded. One click turns an idea into an article.
 - **Edit** — Markdown editor with live preview in the browser; **Download .docx**
@@ -220,19 +236,39 @@ The filesystem *is* the database. Nothing here needs the app to be readable.
 
 ```
 $CF_CONTENT_ROOT/
+├── voices/
+│   └── bob/
+│       ├── voice.json                name, description
+│       ├── samples/                  the uploaded writing
+│       └── profile.md                the generated style guide (edit me)
 └── topics/
     └── youth-sports-parenting/
-        ├── topic.json                 name, description, audience
-        ├── ideas.json                 cached suggestions
-        ├── voice/
-        │   ├── samples/               your uploaded writing
-        │   └── profile.md             the generated style guide (edit me)
+        ├── topic.json                name, description, audience
+        ├── ideas.json                cached suggestions
         └── articles/
             └── what-club-tryouts-cost/
-                ├── article.md         the piece
-                ├── meta.json          title, brief, status, timestamps
-                └── export.docx        rebuilt on each download
+                ├── article.md        the piece
+                ├── meta.json         title, brief, status, voice, styles
+                └── export.docx       rebuilt on each download
 ```
+
+Voices sit beside topics, not inside them — that is what lets one voice write
+across every topic, and one topic draw on several voices.
+
+### Migrating from topic-owned voices
+
+Older content roots kept the voice inside the topic, at `topics/<t>/voice/`.
+`migrate_voices.py` promotes each of those into a standalone voice, moves its
+samples and profile, and back-fills the `voice` field on that topic's existing
+articles so they keep the voice they were written in:
+
+```bash
+python migrate_voices.py
+```
+
+That is a dry run — it prints the plan and changes nothing. Re-run with
+`--apply` to do it. Stop the service first; it moves folders. Re-running after
+a successful pass is a no-op.
 
 Back it up with `rsync`, or `git init` in the content root and commit — you get
 free version history on every article.
@@ -258,16 +294,40 @@ article an agent started is the same job the browser is watching.
 | Tool | |
 |---|---|
 | `content_forge_list_topics` / `_get_topic` / `_create_topic` | topics, paginated |
+| `content_forge_list_voices` / `_create_voice` | voices, independent of topic |
 | `content_forge_get_voice_profile` / `_set_voice_profile` | read and hand-edit the style guide |
 | `content_forge_add_voice_sample` / `_build_voice_profile` | feed samples, then derive the profile |
+| `content_forge_list_writing_styles` | the style catalogue, with descriptions |
 | `content_forge_list_ideas` / `_suggest_ideas` | cached ideas, and a run to refresh them |
 | `content_forge_list_articles` / `_get_article` | discovery, then retrieval for publishing |
-| `content_forge_write_article` / `_rewrite_article` | start a generation |
+| `content_forge_write_article` / `_rewrite_article` | start a generation: topic + voice + styles |
 | `content_forge_update_article` | save an edited body back |
 | `content_forge_export_article_docx` | build the .docx, returns path and URL |
 | `content_forge_get_job` | poll a generation, optionally blocking |
 | `content_forge_health` | can it generate right now, and on which credential |
-| `content_forge_delete_article` / `_delete_topic` | only with `CF_MCP_ALLOW_DELETE=1` |
+| `content_forge_delete_article` / `_delete_topic` / `_delete_voice` | only with `CF_MCP_ALLOW_DELETE=1` |
+
+### Driving it in plain language
+
+The point of splitting topic, voice and style is that an assistant can map a
+sentence straight onto one call. Told *"write an article using the Bob voice in
+a persuasive style in the boating topic about why living on a lake in Florida
+beats the ocean"*, it calls:
+
+```json
+{
+  "tool": "content_forge_write_article",
+  "topic": "boating",
+  "voice": "bob",
+  "styles": ["persuasive"],
+  "title": "Why a Florida lake beats the ocean",
+  "brief": "Make the case that lake living beats coastal living in Florida."
+}
+```
+
+Topic and voice accept the display name as well as the slug, so `"Bob"` and
+`"bob"` both resolve — no lookup call needed first. A voice with no profile
+built yet is refused with an error naming the tool that fixes it.
 
 ### Retrieving an article to publish
 

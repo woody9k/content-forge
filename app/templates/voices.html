@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Voices — Content Forge{% endblock %}
+{% block content %}
+
+<h1>Voices</h1>
+<p class="sub">A voice is a style guide built from someone's real writing. Build it once,
+  then apply it to any article in any topic.</p>
+
+{% if voices %}
+<div class="grid" style="margin-bottom:1.75rem">
+  {% for v in voices %}
+  <a class="topic-card" href="/voices/{{ v.slug }}">
+    <h3>{{ v.name }}</h3>
+    <p>{{ v.description or "No description." }}</p>
+    <div class="pills">
+      {% if v.has_profile %}
+        <span class="pill ok">profile ready</span>
+      {% else %}
+        <span class="pill grey">no profile yet</span>
+      {% endif %}
+      <span class="pill grey">{{ v.sample_count }} sample{{ "s" if v.sample_count != 1 }}</span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">No voices yet — create your first one below.</div>
+{% endif %}
+
+<div class="card">
+  <h2>New voice</h2>
+  <form method="post" action="/voices">
+    <label for="name">Name</label>
+    <input type="text" id="name" name="name" required placeholder="e.g. Bob">
+    <label for="description">What this voice is</label>
+    <textarea id="description" name="description" rows="2"
+      placeholder="Whose voice this is, and when you'd reach for it."></textarea>
+    <div class="actions"><button class="btn" type="submit">Create voice</button></div>
+  </form>
+</div>
+
+{% endblock %}

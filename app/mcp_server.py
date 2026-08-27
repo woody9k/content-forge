@@ -25,7 +25,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
-from . import auth, claude_runner, generate, jobs, storage
+from . import auth, claude_runner, generate, jobs, prompts, storage
 from .config import (CLAUDE_MODEL, CONTENT_ROOT, MCP_ALLOWED_HOSTS,
                      MCP_ALLOWED_ORIGINS)
 from .docx_export import markdown_to_docx
@@ -39,18 +39,26 @@ ALLOW_DELETE = os.environ.get("CF_MCP_ALLOW_DELETE", "").strip().lower() in (
 mcp = FastMCP(
     "content_forge_mcp",
     instructions=(
-        "Content Forge generates articles in a specific author's voice, grouped "
-        "by topic. Each topic carries its own voice profile — a style guide "
-        "derived from the author's real writing — which is applied as a binding "
-        "constraint to every article written under it.\n\n"
-        "Typical flow: content_forge_list_topics to find a topic, "
-        "content_forge_write_article to start a generation (returns a job_id), "
-        "content_forge_get_job to wait for it, then content_forge_get_article "
-        "with format='markdown' or 'html' to retrieve the finished piece for "
-        "publishing.\n\n"
+        "Content Forge writes articles. Three independent things combine on "
+        "every piece:\n"
+        "  - TOPIC: the subject area (e.g. 'boating'). Owns the articles and "
+        "the idea list.\n"
+        "  - VOICE: who it sounds like (e.g. 'bob'). A style guide derived "
+        "from that person's real writing, reusable across every topic.\n"
+        "  - STYLES: how the piece is built and argued (persuasive, "
+        "descriptive, narrative, ...). Chosen per article, combinable.\n\n"
+        "So \"write an article using the Bob voice in a persuasive style in the "
+        "boating topic about X\" maps to content_forge_write_article with "
+        "topic='boating', voice='bob', styles=['persuasive'], brief='X'.\n\n"
+        "Typical flow: content_forge_list_topics and content_forge_list_voices "
+        "to resolve names to slugs, content_forge_write_article to start a "
+        "generation (returns a job_id), content_forge_get_job to wait, then "
+        "content_forge_get_article with format='markdown' or 'html' to "
+        "retrieve the finished piece for publishing.\n\n"
         "Generation is slow: 30-90s without research, several minutes with "
         "references=true. Always go through the job, never assume it is done. "
-        "Article and topic identifiers are slugs (e.g. 'boat-life'), not titles."
+        "Topic, voice and article identifiers are slugs (e.g. 'boat-life'), "
+        "not display names — list them if you only have a name."
     ),
     streamable_http_path="/",
     stateless_http=True,
@@ -76,16 +84,43 @@ def _dump(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False, default=str)
 
 
-def _topic(slug: str) -> storage.Topic:
-    t = storage.get_topic(slug)
-    if not t:
-        known = [x.slug for x in storage.list_topics()]
+def _resolve(value: str, items: list, kind: str, make_hint: str):
+    """Find by slug, then case-insensitively by name.
+
+    Agents are driven by humans who say "the Bob voice" or "the boating
+    topic", so accepting the display name avoids a mandatory list call
+    before every write.
+    """
+    v = value.strip()
+    for it in items:
+        if it.slug == v:
+            return it
+    lowered = v.lower()
+    hits = [it for it in items if it.name.lower() == lowered]
+    if len(hits) == 1:
+        return hits[0]
+    known = [f"{it.slug} ({it.name})" for it in items]
+    if len(hits) > 1:
         raise ToolError(
-            f"No topic with slug '{slug}'. Known slugs: {known or 'none yet'}. "
-            "Use content_forge_list_topics, or content_forge_create_topic to "
-            "make one."
+            f"Several {kind}s are named '{v}': {[h.slug for h in hits]}. "
+            f"Pass the slug instead."
         )
-    return t
+    raise ToolError(
+        f"No {kind} matching '{v}'. Known {kind}s: {known or 'none yet'}. "
+        f"{make_hint}"
+    )
+
+
+def _topic(slug: str) -> storage.Topic:
+    return _resolve(slug, storage.list_topics(), "topic",
+                    "Use content_forge_list_topics, or "
+                    "content_forge_create_topic to make one.")
+
+
+def _voice(slug: str) -> storage.Voice:
+    return _resolve(slug, storage.list_voices(), "voice",
+                    "Use content_forge_list_voices, or "
+                    "content_forge_create_voice to make one.")
 
 
 def _article(topic: str, slug: str) -> storage.Article:
@@ -101,17 +136,22 @@ def _article(topic: str, slug: str) -> storage.Article:
 
 def _topic_dict(t: storage.Topic) -> dict:
     return {"slug": t.slug, "name": t.name, "description": t.description,
-            "audience": t.audience, "has_voice_profile": t.has_voice,
-            "voice_sample_count": t.sample_count,
-            "article_count": t.article_count,
+            "audience": t.audience, "article_count": t.article_count,
             "created_at": t.created_at, "updated_at": t.updated_at}
+
+
+def _voice_dict(v: storage.Voice) -> dict:
+    return {"slug": v.slug, "name": v.name, "description": v.description,
+            "has_profile": v.has_profile, "sample_count": v.sample_count,
+            "created_at": v.created_at, "updated_at": v.updated_at}
 
 
 def _article_dict(a: storage.Article) -> dict:
     return {"slug": a.slug, "topic": a.topic, "title": a.title,
             "status": a.status, "format": a.format,
             "word_target": a.word_target, "with_references": a.with_references,
-            "brief": a.prompt, "error": a.error, "job_id": a.job_id,
+            "voice": a.voice, "styles": a.styles, "brief": a.prompt,
+            "error": a.error, "job_id": a.job_id,
             "created_at": a.created_at, "updated_at": a.updated_at}
 
 
@@ -136,23 +176,34 @@ def _topics_md(rows: list[dict]) -> str:
         return "No topics yet. Create one with content_forge_create_topic."
     out = []
     for t in rows:
-        voice = "voice ready" if t["has_voice_profile"] else "no voice profile"
         out.append(f"## {t['name']} (`{t['slug']}`)\n"
                    f"{t['description'] or '_No description._'}\n\n"
                    f"- Audience: {t['audience'] or 'unspecified'}\n"
-                   f"- {t['article_count']} articles, {voice}, "
-                   f"{t['voice_sample_count']} writing samples")
+                   f"- {t['article_count']} articles")
     return "\n\n".join(out)
+
+
+def _voices_md(rows: list[dict]) -> str:
+    if not rows:
+        return "No voices yet. Create one with content_forge_create_voice."
+    lines = ["| Slug | Name | Profile | Samples |", "|---|---|---|---|"]
+    for v in rows:
+        lines.append(f"| `{v['slug']}` | {v['name']} | "
+                     f"{'ready' if v['has_profile'] else 'not built'} | "
+                     f"{v['sample_count']} |")
+    return "\n".join(lines)
 
 
 def _articles_md(rows: list[dict]) -> str:
     if not rows:
         return "No articles in this topic yet."
-    lines = ["| Slug | Title | Status | Format | Refs | Created |",
-             "|---|---|---|---|---|---|"]
+    lines = ["| Slug | Title | Status | Format | Voice | Styles | Refs | Created |",
+             "|---|---|---|---|---|---|---|---|"]
     for a in rows:
         lines.append(f"| `{a['slug']}` | {a['title']} | {a['status']} | "
-                     f"{a['format']} | {'yes' if a['with_references'] else 'no'} | "
+                     f"{a['format']} | {a['voice'] or 'generic'} | "
+                     f"{', '.join(a['styles']) or '—'} | "
+                     f"{'yes' if a['with_references'] else 'no'} | "
                      f"{a['created_at'][:10]} |")
     return "\n".join(lines)
 
@@ -179,15 +230,15 @@ async def list_topics(
     offset: Annotated[int, Field(description="Topics to skip, for pagination.",
                                  ge=0)] = 0,
 ) -> str:
-    """List every topic, with its article count and whether a voice profile exists.
+    """List every topic — the subject areas articles are filed under.
 
-    A topic is the unit of organisation: it owns a voice profile, a set of
-    articles and an idea list. Start here to discover the `slug` values that
-    every other tool takes.
+    A topic owns articles and an idea list. It does NOT own a voice: voices are
+    separate and reusable across topics, see content_forge_list_voices. Start
+    here to turn a topic name into the `slug` other tools take.
 
     Returns JSON: {total, count, offset, has_more, next_offset, items[]} where
-    each item is {slug, name, description, audience, has_voice_profile,
-    voice_sample_count, article_count, created_at, updated_at}.
+    each item is {slug, name, description, audience, article_count, created_at,
+    updated_at}.
 
     Use when: "what topics exist", "which topic should this article go under".
     """
@@ -205,30 +256,27 @@ async def list_topics(
                  "openWorldHint": False},
 )
 async def get_topic(
-    topic: Annotated[str, Field(description="Topic slug, e.g. 'boat-life'.",
+    topic: Annotated[str, Field(description="Topic slug, e.g. 'boat-life'. The "
+                                            "display name also works.",
                                 min_length=1, max_length=80)],
     response_format: Annotated[Fmt, Field(
         description="'markdown' or 'json'. Default 'json'.")] = "json",
 ) -> str:
-    """Get one topic with its articles, voice-profile status and cached ideas.
+    """Get one topic with its articles and cached idea count.
 
-    A fuller view than content_forge_list_topics: includes the article list, the
-    voice sample filenames, and how many ideas are cached.
+    A fuller view than content_forge_list_topics: includes the article list,
+    each article's voice and styles, and how many ideas are cached.
 
-    Returns JSON: {topic{...}, articles[], voice{has_profile, profile_chars,
-    samples[]}, idea_count}.
+    Returns JSON: {topic{...}, articles[], idea_count}.
 
-    Use when: you have a topic slug and need to see what is already written
-    under it before deciding what to write next.
+    Use when: you have a topic and need to see what is already written under it
+    before deciding what to write next.
     """
     t = _topic(topic)
-    profile = storage.get_voice_profile(topic)
     data = {
         "topic": _topic_dict(t),
-        "articles": [_article_dict(a) for a in storage.list_articles(topic)],
-        "voice": {"has_profile": bool(profile), "profile_chars": len(profile),
-                  "samples": storage.list_samples(topic)},
-        "idea_count": len(storage.get_ideas(topic)),
+        "articles": [_article_dict(a) for a in storage.list_articles(t.slug)],
+        "idea_count": len(storage.get_ideas(t.slug)),
     }
     if response_format == "markdown":
         return (_topics_md([data["topic"]]) + "\n\n### Articles\n"
@@ -253,15 +301,15 @@ async def create_topic(
         description="Who the writing is for, e.g. 'adults who own boats'.",
         max_length=500)] = "",
 ) -> str:
-    """Create a topic folder with an empty voice profile and article list.
+    """Create a topic folder with an empty article list.
 
     The slug is derived from the name; a collision gets a numeric suffix, so
     calling this twice with the same name creates two topics. Check
     content_forge_list_topics first if you might be duplicating.
 
-    A new topic has no voice profile, so articles written under it immediately
-    will use a generic voice. Add samples with content_forge_add_voice_sample
-    and then call content_forge_build_voice_profile.
+    Topics carry no voice. To write in someone's voice under this topic, build
+    a voice separately with content_forge_create_voice and pass its slug to
+    content_forge_write_article.
 
     Returns JSON: the created topic object, including its assigned `slug`.
     """
@@ -276,27 +324,122 @@ async def create_topic(
 # --------------------------------------------------------------------------
 
 @mcp.tool(
+    name="content_forge_list_voices",
+    annotations={"title": "List voices", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": False},
+)
+async def list_voices(
+    response_format: Annotated[Fmt, Field(
+        description="'markdown' for a table, 'json' for structured data.")] = "json",
+    ready_only: Annotated[bool, Field(
+        description="Only voices with a built profile — the ones that can "
+                    "actually be applied to an article.")] = False,
+) -> str:
+    """List every voice — the reusable style guides articles can be written in.
+
+    A voice is independent of topic: 'bob' can write in the boating topic and
+    the gardening topic alike. Only voices with has_profile=true actually shape
+    output; one without a profile still needs
+    content_forge_build_voice_profile.
+
+    Start here to turn a person's name ("the Bob voice") into the `voice` slug
+    that content_forge_write_article takes.
+
+    Returns JSON: {total, count, offset, has_more, next_offset, items[]} where
+    each item is {slug, name, description, has_profile, sample_count,
+    created_at, updated_at}.
+    """
+    rows = [_voice_dict(v) for v in storage.list_voices()]
+    if ready_only:
+        rows = [r for r in rows if r["has_profile"]]
+    page = _paginate(rows, 100, 0)
+    if response_format == "markdown":
+        return _voices_md(page["items"])
+    return _dump(page)
+
+
+@mcp.tool(
+    name="content_forge_list_writing_styles",
+    annotations={"title": "List writing styles", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": False},
+)
+async def list_writing_styles() -> str:
+    """List the writing-style modes an article can be written in.
+
+    Styles are the third axis, alongside topic and voice: the voice decides who
+    the piece sounds like, the style decides how it is built and argued. They
+    combine — ['persuasive', 'descriptive'] is a valid pairing.
+
+    Costs nothing and touches no disk. Call it when a human names a style you
+    want to confirm exists before passing it to content_forge_write_article.
+
+    Returns JSON: {count, styles[{key, description}]} where `key` is the value
+    to pass in the `styles` list.
+    """
+    return _dump({
+        "count": len(prompts.WRITING_STYLES),
+        "styles": [{"key": k, "description": d}
+                   for k, d in prompts.WRITING_STYLES.items()],
+    })
+
+
+@mcp.tool(
+    name="content_forge_create_voice",
+    annotations={"title": "Create voice", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
+)
+async def create_voice(
+    name: Annotated[str, Field(description="Display name, e.g. 'Bob'. The slug "
+                                           "is derived from this.",
+                               min_length=1, max_length=200)],
+    description: Annotated[str, Field(
+        description="Whose voice this is and when to reach for it.",
+        max_length=2000)] = "",
+) -> str:
+    """Create an empty voice, ready for writing samples.
+
+    A new voice has no profile and cannot shape output yet. The full sequence
+    is: create_voice, then content_forge_add_voice_sample one or more times,
+    then content_forge_build_voice_profile.
+
+    The slug is derived from the name; a collision gets a numeric suffix, so
+    check content_forge_list_voices first if you might be duplicating.
+
+    Returns JSON: the created voice object, including its assigned `slug`.
+    """
+    if not name.strip():
+        raise ToolError("Voice name cannot be empty.")
+    v = storage.create_voice(name, description)
+    return _dump(_voice_dict(v))
+
+
+@mcp.tool(
     name="content_forge_get_voice_profile",
     annotations={"title": "Get voice profile", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True,
                  "openWorldHint": False},
 )
 async def get_voice_profile(
-    topic: Annotated[str, Field(description="Topic slug.", min_length=1)],
+    voice: Annotated[str, Field(description="Voice slug, e.g. 'bob'. The "
+                                            "display name also works.",
+                                min_length=1)],
 ) -> str:
-    """Read a topic's voice profile — the style guide applied to its articles.
+    """Read a voice's profile — the style guide applied to articles using it.
 
     The profile is Markdown describing the author's tone, sentence mechanics,
     vocabulary, structural habits and the things they never do. It is passed as
-    a binding system prompt on every generation under this topic, so it is the
-    single biggest lever on output quality.
+    a binding system prompt on every generation that names this voice, so it is
+    the single biggest lever on output quality.
 
-    Returns JSON: {topic, has_profile, profile} where profile is the raw
+    Returns JSON: {voice, has_profile, profile} where profile is the raw
     Markdown, or an empty string if none has been built.
     """
-    _topic(topic)
-    profile = storage.get_voice_profile(topic)
-    return _dump({"topic": topic, "has_profile": bool(profile),
+    v = _voice(voice)
+    profile = storage.get_voice_profile(v.slug)
+    return _dump({"voice": v.slug, "has_profile": bool(profile),
                   "profile": profile})
 
 
@@ -307,28 +450,30 @@ async def get_voice_profile(
                  "openWorldHint": False},
 )
 async def add_voice_sample(
-    topic: Annotated[str, Field(description="Topic slug.", min_length=1)],
+    voice: Annotated[str, Field(description="Voice slug, from "
+                                            "content_forge_list_voices.",
+                                min_length=1)],
     text: Annotated[str, Field(description="The author's own writing, as plain "
                                            "text or Markdown.", min_length=1)],
     name: Annotated[str, Field(description="Short label for this sample, used as "
                                            "the filename.", max_length=100)] = "sample",
 ) -> str:
-    """Add a sample of the author's real writing to a topic.
+    """Add a sample of an author's real writing to a voice.
 
     Samples are the raw material for the voice profile. Quality tracks sample
     quality: a few thousand words of genuine writing beats a lot of filler.
     Adding a sample does NOT rebuild the profile — call
     content_forge_build_voice_profile afterwards.
 
-    Returns JSON: {topic, filename, words, total_samples}.
+    Returns JSON: {voice, filename, words, total_samples}.
     """
-    _topic(topic)
+    v = _voice(voice)
     if not text.strip():
         raise ToolError("Sample text cannot be empty.")
-    fname = storage.save_sample(
-        topic, f"{storage.slugify(name, 'sample')}.md", text.encode("utf-8"))
-    return _dump({"topic": topic, "filename": fname, "words": len(text.split()),
-                  "total_samples": len(storage.list_samples(topic))})
+    fname = storage.save_voice_sample(
+        v.slug, f"{storage.slugify(name, 'sample')}.md", text.encode("utf-8"))
+    return _dump({"voice": v.slug, "filename": fname, "words": len(text.split()),
+                  "total_samples": len(storage.list_voice_samples(v.slug))})
 
 
 @mcp.tool(
@@ -338,22 +483,22 @@ async def add_voice_sample(
                  "openWorldHint": False},
 )
 async def set_voice_profile(
-    topic: Annotated[str, Field(description="Topic slug.", min_length=1)],
+    voice: Annotated[str, Field(description="Voice slug.", min_length=1)],
     profile: Annotated[str, Field(description="The full replacement profile, as "
                                               "Markdown.", min_length=1)],
 ) -> str:
-    """Overwrite a topic's voice profile with hand-edited Markdown.
+    """Overwrite a voice's profile with hand-edited Markdown.
 
     Replaces the whole file — there is no merge. Read the current profile with
     content_forge_get_voice_profile first if you intend to amend rather than
     replace it. Sharpening the 'Do not' section by hand is the usual way to stop
     output drifting back toward generic assistant prose.
 
-    Returns JSON: {topic, chars}.
+    Returns JSON: {voice, chars}.
     """
-    _topic(topic)
-    storage.save_voice_profile(topic, profile)
-    return _dump({"topic": topic, "chars": len(profile)})
+    v = _voice(voice)
+    storage.save_voice_profile(v.slug, profile)
+    return _dump({"voice": v.slug, "chars": len(profile)})
 
 
 @mcp.tool(
@@ -363,7 +508,7 @@ async def set_voice_profile(
                  "openWorldHint": True},
 )
 async def build_voice_profile(
-    topic: Annotated[str, Field(description="Topic slug.", min_length=1)],
+    voice: Annotated[str, Field(description="Voice slug.", min_length=1)],
     notes: Annotated[str, Field(
         description="Anything the samples do not show — words to avoid, how "
                     "formal to go, running jokes.", max_length=2000)] = "",
@@ -375,20 +520,21 @@ async def build_voice_profile(
     hand-tuned. Requires at least a few hundred words of samples or the job
     fails.
 
-    Returns JSON: {job_id, status, topic}. Poll content_forge_get_job; on
-    success its result is {topic, chars, cost}.
+    Returns JSON: {job_id, status, voice}. Poll content_forge_get_job; on
+    success its result is {voice, chars, cost}.
     """
-    t = _topic(topic)
-    if len(storage.collect_samples_text(topic)) < 400:
+    v = _voice(voice)
+    if len(storage.collect_voice_samples_text(v.slug)) < 400:
         raise ToolError(
-            f"Topic '{topic}' has too little sample material "
-            f"({len(storage.list_samples(topic))} samples). Add more with "
-            "content_forge_add_voice_sample first — a few hundred words minimum."
+            f"Voice '{v.slug}' has too little sample material "
+            f"({len(storage.list_voice_samples(v.slug))} samples). Add more "
+            "with content_forge_add_voice_sample first — a few hundred words "
+            "minimum."
         )
-    job = jobs.submit("voice", f"Voice profile — {t.name}",
-                      lambda: generate.build_voice(t, notes),
-                      redirect=f"/topics/{topic}?tab=voice")
-    return _dump({"job_id": job.id, "status": job.status, "topic": topic})
+    job = jobs.submit("voice", f"Voice profile — {v.name}",
+                      lambda: generate.build_voice(v, notes),
+                      redirect=f"/voices/{v.slug}")
+    return _dump({"job_id": job.id, "status": job.status, "voice": v.slug})
 
 
 # --------------------------------------------------------------------------
@@ -412,9 +558,9 @@ async def list_ideas(
 
     Returns JSON: {topic, count, ideas[{title, angle, why, format, words}]}.
     """
-    _topic(topic)
-    ideas = storage.get_ideas(topic)
-    return _dump({"topic": topic, "count": len(ideas), "ideas": ideas})
+    t = _topic(topic)
+    ideas = storage.get_ideas(t.slug)
+    return _dump({"topic": t.slug, "count": len(ideas), "ideas": ideas})
 
 
 @mcp.tool(
@@ -443,8 +589,8 @@ async def suggest_ideas(
     t = _topic(topic)
     job = jobs.submit("ideas", f"Ideas — {t.name}",
                       lambda: generate.suggest_ideas(t, count, research),
-                      redirect=f"/topics/{topic}?tab=ideas")
-    return _dump({"job_id": job.id, "status": job.status, "topic": topic})
+                      redirect=f"/topics/{t.slug}?tab=ideas")
+    return _dump({"job_id": job.id, "status": job.status, "topic": t.slug})
 
 
 # --------------------------------------------------------------------------
@@ -476,10 +622,11 @@ async def list_articles(
 
     Returns JSON: {total, count, offset, has_more, next_offset, items[]} where
     each item is {slug, topic, title, status, format, word_target,
-    with_references, brief, error, job_id, created_at, updated_at}.
+    with_references, voice, styles, brief, error, job_id, created_at,
+    updated_at}.
     """
-    _topic(topic)
-    rows = [_article_dict(a) for a in storage.list_articles(topic)]
+    t = _topic(topic)
+    rows = [_article_dict(a) for a in storage.list_articles(t.slug)]
     if status != "any":
         rows = [r for r in rows if r["status"] == status]
     page = _paginate(rows, limit, offset)
@@ -514,10 +661,11 @@ async def get_article(
     check status first, or wait on its job_id with content_forge_get_job.
 
     Returns: raw Markdown, raw HTML, or JSON {slug, topic, title, status,
-    format, with_references, words, has_references_section, body, created_at,
-    updated_at} depending on `format`.
+    format, voice, styles, with_references, words, has_references_section,
+    body, created_at, updated_at} depending on `format`.
     """
-    _topic(topic)
+    t = _topic(topic)
+    topic = t.slug
     a = _article(topic, article)
     body = storage.read_article_body(topic, article)
 
@@ -545,8 +693,9 @@ async def get_article(
                  "openWorldHint": True},
 )
 async def write_article(
-    topic: Annotated[str, Field(description="Topic slug — determines the voice "
-                                            "profile applied.", min_length=1)],
+    topic: Annotated[str, Field(description="Topic slug — the subject area this "
+                                            "piece is filed under. The display "
+                                            "name also works.", min_length=1)],
     title: Annotated[str, Field(description="Working title. The model may sharpen "
                                             "it; the final title comes from the "
                                             "generated H1.",
@@ -564,34 +713,62 @@ async def write_article(
         description="Run real web searches and append a numbered References "
                     "section with live URLs. Much slower — several minutes — and "
                     "costs more usage. Leave false for opinion pieces.")] = False,
+    voice: Annotated[str, Field(
+        description="Voice slug (or display name) whose style guide this piece "
+                    "must follow — e.g. 'bob'. From content_forge_list_voices. "
+                    "Leave empty for a generic professional tone.",
+        max_length=80)] = "",
+    styles: Annotated[list[Literal["expository", "persuasive", "descriptive",
+                                   "narrative", "minimalist", "lyrical",
+                                   "conversational", "analytical"]],
+                      Field(description="Writing-style modes to layer on top of "
+                                        "the voice for this piece. Independent "
+                                        "of voice — combine any number, e.g. "
+                                        "['persuasive', 'descriptive'].")] = [],
 ) -> str:
-    """Start a job that writes an article in the topic's voice.
+    """Start a job that writes an article: a topic, a voice and a set of styles.
+
+    This is the tool behind requests like "write an article using the Bob voice
+    in a persuasive style in the boating topic about X" — topic='boating',
+    voice='bob', styles=['persuasive'], brief='X'.
 
     Asynchronous and costs Claude usage. Returns immediately with a job_id; the
     article folder exists straight away with status 'generating'. Poll
     content_forge_get_job, then fetch the finished piece with
     content_forge_get_article.
 
-    Timing: roughly 30-90 seconds without references, several minutes with. If
-    the topic has no voice profile the piece is written in a generic voice —
-    check has_voice_profile via content_forge_get_topic first.
+    Timing: roughly 30-90 seconds without references, several minutes with. A
+    voice with no built profile is rejected — build it first with
+    content_forge_build_voice_profile, or pass no voice for a generic tone.
 
-    Returns JSON: {job_id, status, topic, article, title, url} where `article`
-    is the slug to pass to content_forge_get_article.
+    Returns JSON: {job_id, status, topic, voice, styles, article, title, url}
+    where `article` is the slug to pass to content_forge_get_article.
     """
     t = _topic(topic)
-    a = storage.create_article(topic, title, brief or title,
+    vslug = ""
+    if voice.strip():
+        v = _voice(voice)
+        if not v.has_profile:
+            raise ToolError(
+                f"Voice '{v.slug}' has no profile built yet, so it cannot "
+                "shape output. Add samples with content_forge_add_voice_sample "
+                "and run content_forge_build_voice_profile, or omit `voice` to "
+                "write in a generic tone."
+            )
+        vslug = v.slug
+    a = storage.create_article(t.slug, title, brief or title,
                                with_references=references, word_target=words,
-                               fmt=format)
+                               fmt=format, voice=vslug, styles=list(styles))
     a.status = "generating"
     job = jobs.submit("article", f"{t.name} — {a.title}",
                       lambda: generate.generate_article(t, a),
-                      redirect=f"/topics/{topic}/articles/{a.slug}")
+                      redirect=f"/topics/{t.slug}/articles/{a.slug}")
     a.job_id = job.id
     storage.save_article_meta(a)
-    return _dump({"job_id": job.id, "status": job.status, "topic": topic,
+    return _dump({"job_id": job.id, "status": job.status, "topic": t.slug,
+                  "voice": vslug, "styles": a.styles,
                   "article": a.slug, "title": a.title,
-                  "url": f"/topics/{topic}/articles/{a.slug}"})
+                  "url": f"/topics/{t.slug}/articles/{a.slug}"})
 
 
 @mcp.tool(
@@ -610,19 +787,50 @@ async def rewrite_article(
                                             "the current one.", ge=0, le=6000)] = 0,
     references: Annotated[bool, Field(
         description="Whether this run should research and cite sources.")] = False,
+    voice: Annotated[str | None, Field(
+        description="Replacement voice slug. Leave unset (null) to keep the "
+                    "current one; pass an empty string to drop to a generic "
+                    "tone.", max_length=80)] = None,
+    styles: Annotated[list[Literal["expository", "persuasive", "descriptive",
+                                   "narrative", "minimalist", "lyrical",
+                                   "conversational", "analytical"]] | None,
+                      Field(description="Replacement writing-style modes to "
+                                        "layer on top of the voice. Leave "
+                                        "unset (null) to keep the current "
+                                        "ones; pass [] to clear them.")] = None,
 ) -> str:
     """Start a job that regenerates an existing article, replacing its body.
+
+    Use this to re-cut a finished piece in a different voice or style without
+    starting over: pass voice='bob' or styles=['narrative'] and leave the rest
+    unset to inherit.
 
     Destructive: the current body is overwritten when the job completes. Save a
     copy with content_forge_get_article first if it matters.
 
-    Returns JSON: {job_id, status, topic, article}. Poll content_forge_get_job.
+    Returns JSON: {job_id, status, topic, article, voice, styles}. Poll
+    content_forge_get_job.
     """
     t = _topic(topic)
+    topic = t.slug
     a = _article(topic, article)
     if brief.strip():
         a.prompt = brief.strip()
     a.with_references = references
+    if styles is not None:
+        a.styles = list(styles)
+    if voice is not None:
+        if voice.strip():
+            v = _voice(voice)
+            if not v.has_profile:
+                raise ToolError(
+                    f"Voice '{v.slug}' has no profile built yet. Run "
+                    "content_forge_build_voice_profile first, or pass an empty "
+                    "voice for a generic tone."
+                )
+            a.voice = v.slug
+        else:
+            a.voice = ""
     if words:
         a.word_target = words
     a.status = "generating"
@@ -633,7 +841,7 @@ async def rewrite_article(
     a.job_id = job.id
     storage.save_article_meta(a)
     return _dump({"job_id": job.id, "status": job.status, "topic": topic,
-                  "article": article})
+                  "article": article, "voice": a.voice, "styles": a.styles})
 
 
 @mcp.tool(
@@ -658,7 +866,7 @@ async def update_article(
 
     Returns JSON: {topic, article, title, words, status}.
     """
-    _topic(topic)
+    topic = _topic(topic).slug
     a = _article(topic, article)
     storage.write_article_body(topic, article, body)
     a.title = title.strip() or title_from_markdown(body, a.title)
@@ -692,6 +900,7 @@ async def export_article_docx(
     Returns JSON: {topic, article, path, url, bytes}.
     """
     t = _topic(topic)
+    topic = t.slug
     a = _article(topic, article)
     body = storage.read_article_body(topic, article)
     if not body.strip():
@@ -761,15 +970,19 @@ async def health() -> str:
     Claude credential, which must be fixed by a human on the host's /auth page.
     Does not spend an API request.
 
-    Returns JSON: {ok, claude, model, content_root, topics, active_jobs,
-    auth{method, summary, credentials_expired, last_test}}.
+    Returns JSON: {ok, claude, model, content_root, topics, voices,
+    voices_ready, active_jobs, auth{method, summary, credentials_expired,
+    last_test}}.
     """
     ok, ver = claude_runner.cli_available()
     st = auth.state()
+    voices = storage.list_voices()
     return _dump({
         "ok": ok, "claude": ver, "model": CLAUDE_MODEL,
         "content_root": str(CONTENT_ROOT),
         "topics": len(storage.list_topics()),
+        "voices": len(voices),
+        "voices_ready": len([v for v in voices if v.has_profile]),
         "active_jobs": len(jobs.active()),
         "auth": {"method": st["method"], "summary": st["summary"],
                  "credentials_expired": st["credentials"]["expired"],
@@ -797,7 +1010,7 @@ if ALLOW_DELETE:
 
         Irreversible — there is no trash. Returns JSON: {topic, article, deleted}.
         """
-        _topic(topic)
+        topic = _topic(topic).slug
         _article(topic, article)
         return _dump({"topic": topic, "article": article,
                       "deleted": storage.delete_article(topic, article)})
@@ -811,15 +1024,41 @@ if ALLOW_DELETE:
     async def delete_topic(
         topic: Annotated[str, Field(description="Topic slug.", min_length=1)],
     ) -> str:
-        """Permanently delete a topic and every article and voice sample in it.
+        """Permanently delete a topic and every article in it.
+
+        Voices are untouched — they live outside topics and stay available to
+        every other topic.
 
         Irreversible — there is no trash. Returns JSON: {topic, deleted,
         articles_removed}.
         """
         t = _topic(topic)
         n = t.article_count
-        return _dump({"topic": topic, "deleted": storage.delete_topic(topic),
+        return _dump({"topic": t.slug, "deleted": storage.delete_topic(t.slug),
                       "articles_removed": n})
+
+    @mcp.tool(
+        name="content_forge_delete_voice",
+        annotations={"title": "Delete voice", "readOnlyHint": False,
+                     "destructiveHint": True, "idempotentHint": True,
+                     "openWorldHint": False},
+    )
+    async def delete_voice(
+        voice: Annotated[str, Field(description="Voice slug.", min_length=1)],
+    ) -> str:
+        """Permanently delete a voice, its samples and its built profile.
+
+        Articles already written with it keep their text but lose the link, and
+        rewriting one will fall back to a generic tone unless a new voice is
+        named.
+
+        Irreversible — there is no trash. Returns JSON: {voice, deleted,
+        samples_removed}.
+        """
+        v = _voice(voice)
+        n = v.sample_count
+        return _dump({"voice": v.slug, "deleted": storage.delete_voice(v.slug),
+                      "samples_removed": n})
 
 
 # --------------------------------------------------------------------------

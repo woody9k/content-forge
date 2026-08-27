@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSON
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth, claude_runner, generate, jobs, storage
+from . import auth, claude_runner, generate, jobs, prompts, storage
 from .config import APP_DIR, CLAUDE_BIN, CLAUDE_MODEL, CONTENT_ROOT
 from .docx_export import markdown_to_docx
 from .mcp_server import lifespan as mcp_lifespan, mount_mcp
@@ -38,6 +38,33 @@ def _article_or_404(topic: str, slug: str) -> storage.Article:
     if not a:
         raise HTTPException(404, f"No article '{slug}'")
     return a
+
+
+def _voice_or_404(slug: str) -> storage.Voice:
+    v = storage.get_voice(slug)
+    if not v:
+        raise HTTPException(404, f"No voice '{slug}'")
+    return v
+
+
+def _usable_voice(slug: str) -> str:
+    """Validate a voice chosen for an article, returning the slug to store.
+
+    A voice with no built profile cannot shape anything — generation would
+    quietly fall back to generic prose while the article page claimed the
+    voice was applied. Refuse it here rather than lie about it later.
+    """
+    if not slug:
+        return ""
+    v = storage.get_voice(slug)
+    if not v:
+        raise HTTPException(400, f"No voice '{slug}'")
+    if not v.has_profile:
+        raise HTTPException(
+            400, f"Voice '{v.name}' has no profile built yet, so it cannot "
+                 "shape the writing. Build it from its samples first, or "
+                 "choose no voice.")
+    return v.slug
 
 
 def _render(request: Request, name: str, **ctx) -> HTMLResponse:
@@ -72,9 +99,9 @@ def topic_page(request: Request, slug: str, tab: str = "articles"):
     t = _topic_or_404(slug)
     return _render(request, "topic.html", topic=t, tab=tab,
                    articles=storage.list_articles(slug),
-                   samples=storage.list_samples(slug),
-                   profile=storage.get_voice_profile(slug),
-                   ideas=storage.get_ideas(slug))
+                   ideas=storage.get_ideas(slug),
+                   styles=prompts.WRITING_STYLES,
+                   voices=storage.list_voices())
 
 
 @app.post("/topics/{slug}/edit")
@@ -93,48 +120,82 @@ def delete_topic(slug: str):
 
 
 # --------------------------------------------------------------------------
-# voice
+# voices — independent of topic, applied to individual articles
 # --------------------------------------------------------------------------
 
-@app.post("/topics/{slug}/voice/samples")
-async def upload_samples(slug: str, files: list[UploadFile] = File(...)):
-    _topic_or_404(slug)
+@app.get("/voices", response_class=HTMLResponse)
+def voices_index(request: Request):
+    return _render(request, "voices.html", voices=storage.list_voices())
+
+
+@app.post("/voices")
+def create_voice(name: str = Form(...), description: str = Form("")):
+    if not name.strip():
+        raise HTTPException(400, "Voice name required")
+    v = storage.create_voice(name, description)
+    return RedirectResponse(f"/voices/{v.slug}", status_code=303)
+
+
+@app.get("/voices/{slug}", response_class=HTMLResponse)
+def voice_page(request: Request, slug: str, tab: str = "profile"):
+    v = _voice_or_404(slug)
+    return _render(request, "voice.html", voice=v, tab=tab,
+                   samples=storage.list_voice_samples(slug),
+                   profile=storage.get_voice_profile(slug))
+
+
+@app.post("/voices/{slug}/edit")
+def edit_voice(slug: str, name: str = Form(...), description: str = Form("")):
+    _voice_or_404(slug)
+    storage.update_voice(slug, name=name.strip(), description=description.strip())
+    return RedirectResponse(f"/voices/{slug}?tab=settings", status_code=303)
+
+
+@app.post("/voices/{slug}/delete")
+def delete_voice(slug: str):
+    storage.delete_voice(slug)
+    return RedirectResponse("/voices", status_code=303)
+
+
+@app.post("/voices/{slug}/samples")
+async def upload_voice_samples(slug: str, files: list[UploadFile] = File(...)):
+    _voice_or_404(slug)
     for f in files:
         if f.filename:
-            storage.save_sample(slug, f.filename, await f.read())
-    return RedirectResponse(f"/topics/{slug}?tab=voice", status_code=303)
+            storage.save_voice_sample(slug, f.filename, await f.read())
+    return RedirectResponse(f"/voices/{slug}?tab=profile", status_code=303)
 
 
-@app.post("/topics/{slug}/voice/paste")
-def paste_sample(slug: str, name: str = Form("pasted-sample"),
-                 text: str = Form(...)):
-    _topic_or_404(slug)
+@app.post("/voices/{slug}/paste")
+def paste_voice_sample(slug: str, name: str = Form("pasted-sample"),
+                       text: str = Form(...)):
+    _voice_or_404(slug)
     if text.strip():
-        storage.save_sample(slug, f"{storage.slugify(name, 'sample')}.md",
-                            text.encode("utf-8"))
-    return RedirectResponse(f"/topics/{slug}?tab=voice", status_code=303)
+        storage.save_voice_sample(slug, f"{storage.slugify(name, 'sample')}.md",
+                                  text.encode("utf-8"))
+    return RedirectResponse(f"/voices/{slug}?tab=profile", status_code=303)
 
 
-@app.post("/topics/{slug}/voice/samples/delete")
-def remove_sample(slug: str, name: str = Form(...)):
-    storage.delete_sample(slug, name)
-    return RedirectResponse(f"/topics/{slug}?tab=voice", status_code=303)
+@app.post("/voices/{slug}/samples/delete")
+def remove_voice_sample(slug: str, name: str = Form(...)):
+    storage.delete_voice_sample(slug, name)
+    return RedirectResponse(f"/voices/{slug}?tab=profile", status_code=303)
 
 
-@app.post("/topics/{slug}/voice/build")
+@app.post("/voices/{slug}/build")
 def build_voice(slug: str, notes: str = Form("")):
-    t = _topic_or_404(slug)
-    job = jobs.submit("voice", f"Voice profile — {t.name}",
-                      lambda: generate.build_voice(t, notes),
-                      redirect=f"/topics/{slug}?tab=voice")
+    v = _voice_or_404(slug)
+    job = jobs.submit("voice", f"Voice profile — {v.name}",
+                      lambda: generate.build_voice(v, notes),
+                      redirect=f"/voices/{slug}")
     return RedirectResponse(f"/jobs/{job.id}/wait", status_code=303)
 
 
-@app.post("/topics/{slug}/voice/profile")
+@app.post("/voices/{slug}/profile")
 def save_profile(slug: str, profile: str = Form(...)):
-    _topic_or_404(slug)
+    _voice_or_404(slug)
     storage.save_voice_profile(slug, profile)
-    return RedirectResponse(f"/topics/{slug}?tab=voice", status_code=303)
+    return RedirectResponse(f"/voices/{slug}?tab=profile", status_code=303)
 
 
 # --------------------------------------------------------------------------
@@ -157,11 +218,15 @@ def suggest(slug: str, count: int = Form(8), research: str = Form("")):
 @app.post("/topics/{slug}/articles")
 def new_article(slug: str, title: str = Form(...), prompt: str = Form(""),
                 fmt: str = Form("blog post"), words: int = Form(900),
-                references: str = Form("")):
+                references: str = Form(""), styles: list[str] = Form([]),
+                voice: str = Form("")):
     t = _topic_or_404(slug)
+    valid_styles = [s for s in styles if s in prompts.WRITING_STYLES]
+    vslug = _usable_voice(voice)
     a = storage.create_article(slug, title, prompt or title,
                                with_references=bool(references),
-                               word_target=max(150, min(words, 6000)), fmt=fmt)
+                               word_target=max(150, min(words, 6000)), fmt=fmt,
+                               voice=vslug, styles=valid_styles)
     a.status = "generating"
     job = jobs.submit("article", f"{t.name} — {a.title}",
                       lambda: generate.generate_article(t, a),
@@ -177,7 +242,9 @@ def article_page(request: Request, slug: str, aslug: str):
     a = _article_or_404(slug, aslug)
     body = storage.read_article_body(slug, aslug)
     return _render(request, "article.html", topic=t, article=a, body=body,
-                   preview_html=render_markdown(body))
+                   preview_html=render_markdown(body), styles=prompts.WRITING_STYLES,
+                   voices=storage.list_voices(),
+                   voice_obj=storage.get_voice(a.voice) if a.voice else None)
 
 
 @app.post("/topics/{slug}/articles/{aslug}")
@@ -199,12 +266,15 @@ def save_article(slug: str, aslug: str, body: str = Form(...),
 
 @app.post("/topics/{slug}/articles/{aslug}/regenerate")
 def regenerate(slug: str, aslug: str, prompt: str = Form(""),
-               references: str = Form(""), words: int = Form(0)):
+               references: str = Form(""), words: int = Form(0),
+               styles: list[str] = Form([]), voice: str = Form("")):
     t = _topic_or_404(slug)
     a = _article_or_404(slug, aslug)
     if prompt.strip():
         a.prompt = prompt.strip()
     a.with_references = bool(references)
+    a.styles = [s for s in styles if s in prompts.WRITING_STYLES]
+    a.voice = _usable_voice(voice)
     if words:
         a.word_target = max(150, min(words, 6000))
     a.status = "generating"
@@ -354,5 +424,6 @@ def health():
         "model": CLAUDE_MODEL,
         "content_root": str(CONTENT_ROOT),
         "topics": len(storage.list_topics()),
+        "voices": len(storage.list_voices()),
         "active_jobs": len(jobs.active()),
     })

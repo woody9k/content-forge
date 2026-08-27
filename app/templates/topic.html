@@ -10,7 +10,6 @@
   <a href="?tab=articles" class="{{ 'on' if tab == 'articles' }}">Articles ({{ articles|length }})</a>
   <a href="?tab=write"    class="{{ 'on' if tab == 'write' }}">Write</a>
   <a href="?tab=ideas"    class="{{ 'on' if tab == 'ideas' }}">Ideas</a>
-  <a href="?tab=voice"    class="{{ 'on' if tab == 'voice' }}">Voice {% if topic.has_voice %}✓{% endif %}</a>
   <a href="?tab=settings" class="{{ 'on' if tab == 'settings' }}">Settings</a>
 </div>
 
@@ -53,10 +52,10 @@
 
 {# ------------------------------------------------------------------- write #}
 {% if tab == "write" %}
-  {% if not topic.has_voice %}
+  {% if not voices %}
   <div class="banner">
-    No voice profile for this topic yet — output will use a generic voice.
-    <a href="?tab=voice">Build one</a> from your samples first.
+    No voices built yet — output will use a generic tone.
+    <a href="/voices">Create one</a> from writing samples first.
   </div>
   {% endif %}
   <div class="card">
@@ -70,6 +69,15 @@
         placeholder="What should this piece argue or deliver? Angle, must-hit points, anything to avoid."></textarea>
       <div class="row">
         <div>
+          <label for="voice">Voice</label>
+          <select id="voice" name="voice">
+            <option value="">Generic (no voice)</option>
+            {% for v in voices if v.has_profile %}
+            <option value="{{ v.slug }}">{{ v.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
           <label for="fmt">Format</label>
           <select id="fmt" name="fmt">
             {% for f in ["blog post","how-to","listicle","opinion","explainer","review","newsletter","interview"] %}
@@ -80,6 +88,13 @@
           <label for="words">Target words</label>
           <input type="number" id="words" name="words" value="900" min="150" max="6000" step="50">
         </div>
+      </div>
+      <label>Writing style <span class="hint">(optional — layers on top of the author's voice; pick one or combine a few)</span></label>
+      <div class="style-grid">
+        {% for key, desc in styles.items() %}
+        <label class="check style-opt" title="{{ desc }}">
+          <input type="checkbox" name="styles" value="{{ key }}"> {{ key.capitalize() }}</label>
+        {% endfor %}
       </div>
       <label class="check"><input type="checkbox" name="references" value="1">
         Research and cite sources (slower — the agent searches the web)</label>
@@ -121,85 +136,18 @@
       <input type="hidden" name="prompt" value="{{ i.angle }} — {{ i.why }}">
       <input type="hidden" name="fmt" value="{{ i.format }}">
       <input type="hidden" name="words" value="{{ i.words }}">
+      <select name="voice" style="max-width:16rem">
+        <option value="">Generic (no voice)</option>
+        {% for v in voices if v.has_profile %}
+        <option value="{{ v.slug }}">{{ v.name }}</option>
+        {% endfor %}
+      </select>
       <label class="check" style="margin:0"><input type="checkbox" name="references" value="1"> with references</label>
       <button class="btn sm" type="submit">Write this</button>
     </form>
   </div>
   {% endfor %}
   {% endif %}
-{% endif %}
-
-{# ------------------------------------------------------------------- voice #}
-{% if tab == "voice" %}
-<div class="split">
-  <div>
-    <div class="card">
-      <h2>Writing samples</h2>
-      {% if samples %}
-      <table>
-        <thead><tr><th>File</th><th>Words</th><th></th></tr></thead>
-        <tbody>
-        {% for s in samples %}
-        <tr>
-          <td>{{ s.name }}</td>
-          <td style="color:var(--muted)">{{ s.words }}</td>
-          <td style="text-align:right">
-            <form method="post" action="/topics/{{ topic.slug }}/voice/samples/delete">
-              <input type="hidden" name="name" value="{{ s.name }}">
-              <button class="btn danger sm" type="submit">Remove</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="empty">No samples yet.</div>
-      {% endif %}
-
-      <form method="post" action="/topics/{{ topic.slug }}/voice/samples"
-            enctype="multipart/form-data">
-        <label for="files">Upload (.md .txt .docx)</label>
-        <input type="file" id="files" name="files" multiple accept=".md,.txt,.markdown,.docx,.rst">
-        <div class="actions"><button class="btn ghost sm" type="submit">Upload</button></div>
-      </form>
-
-      <form method="post" action="/topics/{{ topic.slug }}/voice/paste" style="margin-top:1rem">
-        <label for="text">…or paste a sample</label>
-        <textarea id="text" name="text" rows="5" placeholder="Paste something you wrote."></textarea>
-        <input type="text" name="name" placeholder="name for this sample" style="margin-top:.5rem">
-        <div class="actions"><button class="btn ghost sm" type="submit">Add sample</button></div>
-      </form>
-    </div>
-
-    <div class="card">
-      <h2>Build the profile</h2>
-      <form method="post" action="/topics/{{ topic.slug }}/voice/build">
-        <label for="notes">Notes about your voice (optional)</label>
-        <textarea id="notes" name="notes" rows="3"
-          placeholder="Anything the samples don't show: words you refuse to use, how formal to go, running jokes."></textarea>
-        <div class="actions">
-          <button class="btn" type="submit">
-            {{ "Rebuild profile" if profile else "Build profile" }}</button>
-        </div>
-        <p class="hint">Reads every sample above and writes a style guide the writer must follow.</p>
-      </form>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Voice profile</h2>
-    {% if profile %}
-    <form method="post" action="/topics/{{ topic.slug }}/voice/profile">
-      <textarea name="profile" class="profile" rows="30">{{ profile }}</textarea>
-      <div class="actions"><button class="btn ghost sm" type="submit">Save edits</button></div>
-      <p class="hint">Hand-editing this is encouraged — it is the single biggest lever on output quality.</p>
-    </form>
-    {% else %}
-    <div class="empty">No profile yet. Add samples, then build.</div>
-    {% endif %}
-  </div>
-</div>
 {% endif %}
 
 {# ---------------------------------------------------------------- settings #}

@@ -8,7 +8,11 @@
 <p class="sub">
   <span class="pill grey">{{ article.format }}</span>
   <span class="pill grey">{{ article.word_target }} words target</span>
+  {% if voice_obj %}<a class="pill ok" href="/voices/{{ voice_obj.slug }}">{{ voice_obj.name }} voice</a>
+  {% elif article.voice %}<span class="pill err">voice “{{ article.voice }}” missing</span>
+  {% else %}<span class="pill grey">generic voice</span>{% endif %}
   {% if article.with_references %}<span class="pill">with references</span>{% endif %}
+  {% for s in article.styles %}<span class="pill">{{ s.capitalize() }}</span>{% endfor %}
   <span class="pill grey">{{ body.split()|length }} words actual</span>
 </p>
 
@@ -56,6 +60,16 @@
     <textarea id="prompt" name="prompt" rows="4">{{ article.prompt }}</textarea>
     <div class="row">
       <div>
+        <label for="rvoice">Voice</label>
+        <select id="rvoice" name="voice">
+          <option value="">Generic (no voice)</option>
+          {% for v in voices if v.has_profile %}
+          <option value="{{ v.slug }}" {{ "selected" if v.slug == article.voice }}>
+            {{ v.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
         <label for="rwords">Target words</label>
         <input type="number" id="rwords" name="words" value="{{ article.word_target }}"
                min="150" max="6000" step="50">
@@ -65,6 +79,14 @@
           <input type="checkbox" name="references" value="1"
                  {{ "checked" if article.with_references }}> Research and cite sources</label>
       </div>
+    </div>
+    <label>Writing style <span class="hint">(optional — layers on top of the author's voice)</span></label>
+    <div class="style-grid">
+      {% for key, desc in styles.items() %}
+      <label class="check style-opt" title="{{ desc }}">
+        <input type="checkbox" name="styles" value="{{ key }}"
+               {{ "checked" if key in article.styles }}> {{ key.capitalize() }}</label>
+      {% endfor %}
     </div>
     <div class="actions"><button class="btn ghost" type="submit">Regenerate</button></div>
   </form>

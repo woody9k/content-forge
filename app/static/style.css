@@ -67,6 +67,8 @@ input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-
   font-weight:400;color:var(--ink);margin:.85rem 0 0}
 .check input{width:auto;margin:0}
 .hint{font-size:.78rem;color:var(--muted);margin:.35rem 0 0}
+.style-grid{display:flex;flex-wrap:wrap;gap:.4rem .9rem;margin:.3rem 0 0}
+.style-grid .check{margin:0}
 
 .btn{display:inline-block;padding:.55rem 1rem;border-radius:7px;border:1px solid var(--accent);
   background:var(--accent);color:#fff;font:inherit;font-size:.9rem;font-weight:600;
