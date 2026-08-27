@@ -99,6 +99,32 @@ async def main():
             check("schemas name their params",
                   "topic" in tools["content_forge_get_article"].inputSchema["properties"])
 
+            # Anthropic accepts nullable unions; OpenAI's strict function
+            # schemas reject them, and a client that validates the whole
+            # tools/list payload then exposes NO tools at all rather than
+            # skipping the offender. Keep the schemas portable.
+            import re as _re
+            name_re = _re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+            offenders = {"anyOf": [], "null": [], "name": [], "desc": []}
+            for n, t in tools.items():
+                schema = json.dumps(t.inputSchema)
+                if '"anyOf"' in schema:
+                    offenders["anyOf"].append(n)
+                if '"null"' in schema:
+                    offenders["null"].append(n)
+                if not name_re.match(n):
+                    offenders["name"].append(n)
+                if len(t.description or "") > 1024:
+                    offenders["desc"].append(n)
+            check("no anyOf in any tool schema", not offenders["anyOf"],
+                  str(offenders["anyOf"]))
+            check("no null type in any tool schema", not offenders["null"],
+                  str(offenders["null"]))
+            check("every tool name is portable", not offenders["name"],
+                  str(offenders["name"]))
+            check("every description under 1024 chars", not offenders["desc"],
+                  str(offenders["desc"]))
+
             # ---------------- topics ----------------
             r = await s.call_tool("content_forge_create_topic", {
                 "name": "Boat Life", "description": "Docks, wakeboards, coolers.",
