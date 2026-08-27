@@ -38,13 +38,18 @@ async def require_access_token(request: Request, call_next):
     if not ACCESS_TOKEN or request.url.path in ("/health",):
         return await call_next(request)
 
-    header = request.headers.get("authorization", "")
+    # RFC 7235: the auth scheme is case-insensitive. Matching it exactly meant
+    # a spec-compliant client sending "bearer" got a 401 indistinguishable from
+    # a wrong token — an afternoon lost to a credential that was fine.
+    scheme, _, credentials = request.headers.get("authorization", "").partition(" ")
+    scheme, credentials = scheme.lower(), credentials.strip()
+
     ok = False
-    if header.startswith("Bearer "):
-        ok = _token_matches(header[len("Bearer "):].strip())
-    elif header.startswith("Basic "):
+    if scheme == "bearer":
+        ok = _token_matches(credentials)
+    elif scheme == "basic":
         try:
-            _, _, password = base64.b64decode(header[len("Basic "):]).decode(
+            _, _, password = base64.b64decode(credentials).decode(
                 "utf-8", "replace").partition(":")
         except (ValueError, UnicodeDecodeError):
             password = ""

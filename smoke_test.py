@@ -408,6 +408,54 @@ check("delete voice", c.post(f"/voices/{vslug}/delete",
                              follow_redirects=False).status_code == 303
       and not storage.voice_dir(vslug).exists())
 
+print("\n--- access token ---")
+# This gate is only active when CF_ACCESS_TOKEN is set, which the rest of the
+# suite deliberately leaves unset, so it gets its own app instance.
+import base64  # noqa: E402
+import importlib  # noqa: E402
+
+os.environ["CF_ACCESS_TOKEN"] = "s3cret-for-the-test"
+try:
+    import app.config as _cfg
+    import app.main as _main
+    importlib.reload(_cfg)
+    _gated = importlib.reload(_main)
+    gc = TestClient(_gated.app)
+    b64 = base64.b64encode(b"x:s3cret-for-the-test").decode()
+
+    def status(header=None):
+        h = {"Authorization": header} if header else {}
+        return gc.get("/voices", headers=h).status_code
+
+    # RFC 7235 makes the auth scheme case-insensitive. Matching it exactly
+    # turned a valid credential into a 401 that looked like a bad token.
+    for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
+        check(f"{scheme} accepted", status(f"{scheme} s3cret-for-the-test") == 200)
+    for scheme in ("Basic", "basic", "BASIC"):
+        check(f"{scheme} accepted", status(f"{scheme} {b64}") == 200)
+
+    check("wrong bearer token refused", status("Bearer nope") == 401)
+    check("wrong basic password refused",
+          status("Basic " + base64.b64encode(b"x:nope").decode()) == 401)
+    check("missing header refused", status() == 401)
+    check("scheme with no credentials refused", status("Bearer") == 401
+          and status("Bearer ") == 401)
+    check("unknown scheme refused", status("Token s3cret-for-the-test") == 401)
+    check("bare token without a scheme refused",
+          status("s3cret-for-the-test") == 401)
+    check("malformed base64 refused", status("Basic !!!notb64!!!") == 401)
+    check("401 advertises how to authenticate",
+          "Basic" in gc.get("/voices").headers.get("www-authenticate", ""))
+    check("/health stays reachable for monitoring",
+          gc.get("/health").status_code == 200)
+    check("MCP endpoint is gated too",
+          gc.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                "method": "tools/list"}).status_code == 401)
+finally:
+    os.environ.pop("CF_ACCESS_TOKEN", None)
+    importlib.reload(_cfg)
+    importlib.reload(_main)
+
 print("\n--- errors ---")
 check("404 unknown topic", c.get("/topics/nope").status_code == 404)
 check("404 unknown voice", c.get("/voices/nope").status_code == 404)
