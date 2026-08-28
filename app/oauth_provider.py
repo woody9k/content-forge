@@ -27,12 +27,14 @@ import hashlib
 import json
 import secrets
 import time
+import uuid
 
 from mcp.server.auth.provider import (AccessToken, AuthorizationCode,
                                       AuthorizationParams, AuthorizeError,
                                       RefreshToken, RegistrationError,
                                       construct_redirect_uri)
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from pydantic import AnyUrl
 
 from . import accounts
 from .accounts import User, connect
@@ -236,6 +238,113 @@ def revoke_client_for_user(client_id: str, user_id: int) -> None:
                      (client_id, user_id))
         conn.execute("DELETE FROM oauth_refresh WHERE client_id=? AND user_id=?",
                      (client_id, user_id))
+
+
+# --------------------------------------------------------------------------
+# administering clients
+#
+# A hosted connector platform reads our metadata but does NOT call the
+# registration endpoint — it asks the person setting it up for a client id and
+# secret instead. So somebody has to be able to mint a pair without reaching
+# for curl, which is what these and the /clients page exist for.
+#
+# One client serves everybody. The credentials identify the *application*, not
+# the person: each user still signs in as themselves and approves their own
+# consent, so tokens stay per-user and individually revocable.
+# --------------------------------------------------------------------------
+
+# Where claude.ai sends the browser back. Verified against a real connection
+# rather than guessed — the other candidates tried during setup (localhost
+# callbacks) were never used.
+CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
+
+
+def create_client(name: str, redirect_uris: list[str]) -> OAuthClientInformationFull:
+    """Register a client by hand, the way /register does for a self-registering
+    one. `client_secret_post` is not a guess: it is the method the working
+    connection actually used."""
+    name = (name or "").strip() or "Claude"
+    uris = [u.strip() for u in redirect_uris if u.strip()]
+    if not uris:
+        raise ValueError("at least one redirect URI is required")
+
+    info = OAuthClientInformationFull(
+        client_id=str(uuid.uuid4()),
+        # Stored as given, because the SDK compares it with compare_digest at
+        # the token endpoint and so needs it back verbatim. That is why
+        # auth.db is 0600 — and why a leaked secret is rotated by deleting the
+        # client here rather than by "changing the password".
+        client_secret=secrets.token_hex(32),
+        client_id_issued_at=_now(),
+        client_secret_expires_at=None,
+        client_name=name,
+        redirect_uris=[AnyUrl(u) for u in uris],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="client_secret_post",
+        application_type="web",
+        scope=MCP_SCOPE,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, info_json, created_at)"
+            " VALUES (?,?,?)", (info.client_id, info.model_dump_json(), _now()))
+    return info
+
+
+def list_clients() -> list[dict]:
+    """Every registered client, with how many people have connected through
+    it — the number that says whether deleting one will cut anybody off."""
+    out = []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT client_id, info_json, created_at FROM oauth_clients"
+            " ORDER BY created_at DESC").fetchall()
+        for r in rows:
+            info = OAuthClientInformationFull.model_validate_json(r["info_json"])
+            users = conn.execute(
+                "SELECT COUNT(DISTINCT user_id) n FROM oauth_refresh"
+                " WHERE client_id=? AND expires_at > ?",
+                (r["client_id"], _now())).fetchone()["n"]
+            out.append({
+                "client_id": info.client_id,
+                "client_secret": info.client_secret,
+                "name": info.client_name or info.client_id,
+                "redirect_uris": [str(u) for u in (info.redirect_uris or [])],
+                "created_at": r["created_at"],
+                "connected_users": users,
+            })
+    return out
+
+
+def delete_client(client_id: str) -> bool:
+    """Remove a client and everything issued through it. This is the rotation
+    story for a leaked secret: there is no way to change one in place, because
+    the credential *is* the record."""
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM oauth_clients WHERE client_id=?",
+                           (client_id,))
+        for table in ("oauth_access", "oauth_refresh", "oauth_codes",
+                      "oauth_pending"):
+            conn.execute(f"DELETE FROM {table} WHERE client_id=?", (client_id,))
+        return cur.rowcount > 0
+
+
+def set_redirect_uris(client_id: str, redirect_uris: list[str]) -> bool:
+    """Narrow (or correct) where a client may be sent back to. Every extra URI
+    is another place an authorization code may legitimately land, so a list
+    that accumulated guesses is worth trimming once the real one is known."""
+    uris = [u.strip() for u in redirect_uris if u.strip()]
+    if not uris:
+        raise ValueError("at least one redirect URI is required")
+    info = get_client_sync(client_id)
+    if info is None:
+        return False
+    info.redirect_uris = [AnyUrl(u) for u in uris]
+    with connect() as conn:
+        conn.execute("UPDATE oauth_clients SET info_json=? WHERE client_id=?",
+                     (info.model_dump_json(), client_id))
+    return True
 
 
 # --------------------------------------------------------------------------

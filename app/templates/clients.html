@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Connectors — Content Forge{% endblock %}
+{% block content %}
+<h1>Connectors</h1>
+<p class="sub">Credentials people paste into Claude to connect it to this
+  server. They identify the <em>application</em>, not the person — everyone can
+  share one pair, and each still signs in and approves for themselves, so their
+  access stays separate and separately revocable.</p>
+
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+
+{% if clients %}
+  {% for c in clients %}
+  <div class="card">
+    <div class="card-head">
+      <h3>{{ c.name }}</h3>
+      <span class="pill">{{ c.connected_users }} connected</span>
+    </div>
+
+    <p class="hint">Give these three to whoever is adding the connector:</p>
+    <table class="tokens">
+      <tr><th>Server URL</th><td><code>{{ mcp_url }}</code></td></tr>
+      <tr><th>Client ID</th><td><code>{{ c.client_id }}</code></td></tr>
+      <tr><th>Client secret</th><td><code>{{ c.client_secret }}</code></td></tr>
+    </table>
+
+    <form method="post" action="/clients/{{ c.client_id }}/redirect-uris">
+      <label class="row">
+        <span class="rowlabel">Sends people back to</span>
+        <textarea name="redirect_uris" rows="2">{% for u in c.redirect_uris %}{{ u }}
+{% endfor %}</textarea>
+        <span class="hint">One per line. Editing this keeps the credentials, so
+          the {{ c.connected_users }} account(s) already connected stay
+          connected — recreating the connector to fix a typo would sign them
+          all out.</span>
+      </label>
+      <button class="linkbtn" type="submit">Save</button>
+    </form>
+
+    <form method="post" action="/clients/{{ c.client_id }}/delete"
+          onsubmit="return confirm('Delete {{ c.name }}? Everyone connected through it — {{ c.connected_users }} account(s) — will be signed out of it and must reconnect.')">
+      <button class="linkbtn danger" type="submit">Delete this connector</button>
+    </form>
+  </div>
+  {% endfor %}
+{% else %}
+<div class="empty">No connectors yet — create one below.</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head"><h3>New connector</h3></div>
+  <form method="post" action="/clients">
+    <label class="row">
+      <span class="rowlabel">Name</span>
+      <input name="name" value="Claude" required>
+      <span class="hint">Shown on the approval screen, so people recognise
+        what they are letting in.</span>
+    </label>
+    <label class="row">
+      <span class="rowlabel">Redirect URIs</span>
+      <textarea name="redirect_uris" rows="2">{{ default_redirect }}</textarea>
+      <span class="hint">One per line. The default is where claude.ai sends
+        people back and is almost certainly what you want — it was confirmed
+        against a real connection. Every extra line is another place an
+        authorization code may be sent, so add one only if you know you need it.</span>
+    </label>
+    <div class="actions"><button class="btn" type="submit">Create</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>Adding someone</h3></div>
+  <ol>
+    <li>On the server: <code>./deploy/add-user.sh alice</code> — this prints a
+      single-use invite link.</li>
+    <li>Send them the link. They choose their own password in the browser.</li>
+    <li>Send them the three values above. They paste them into Claude's
+      connector settings.</li>
+    <li>They sign in here and click Approve.</li>
+  </ol>
+  <p class="hint">Nothing in that list needs a terminal on their side. To cut
+    someone off later, disable their account with
+    <code>./deploy/add-user.sh disable alice</code> — deleting the connector
+    here would disconnect everybody.</p>
+</div>
+{% endblock %}

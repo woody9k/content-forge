@@ -15,7 +15,7 @@
   {% if current_user %}
     <a href="/">Topics</a>
     <a href="/voices">Voices</a>
-    {% if current_user.is_admin %}<a href="/auth">Auth</a>{% endif %}
+    {% if current_user.is_admin %}<a href="/clients">Connectors</a><a href="/auth">Auth</a>{% endif %}
     <a href="/account">{{ current_user.display_name }}</a>
     <form method="post" action="/logout" class="navform">
       <button class="linkbtn" type="submit">Sign out</button>

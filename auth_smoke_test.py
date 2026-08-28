@@ -458,6 +458,111 @@ async def main():
             check("throttling one name does not lock out another",
                   r.status_code == 303, r.status_code)
 
+        # -- the connector admin page --------------------------------------
+        # A hosted platform never self-registers, so an admin has to be able
+        # to mint a client id and secret without curl. What matters is not
+        # that the page renders, but that what it hands out actually works.
+        async with httpx2.AsyncClient(follow_redirects=False) as bobc:
+            await bobc.post(f"{BASE}/login",
+                            data={"username": "bob", "password": BOB_PW, "next": "/"})
+            r = await bobc.get(f"{BASE}/clients")
+            check("a non-admin cannot see connector credentials",
+                  r.status_code == 403, r.status_code)
+            r = await bobc.post(f"{BASE}/clients", data={"name": "sneaky"})
+            check("a non-admin cannot create a connector",
+                  r.status_code == 403, r.status_code)
+
+        r = await c.get(f"{BASE}/clients")
+        check("admin reaches the connector page", r.status_code == 200, r.status_code)
+        check("the page prefills the verified callback",
+              oauth_provider.CLAUDE_REDIRECT_URI in r.text)
+
+        r = await c.post(f"{BASE}/clients",
+                         data={"name": "Desk Client",
+                               "redirect_uris": "https://desk.example/cb"})
+        check("admin creates a connector", r.status_code == 303, r.status_code)
+
+        made = [c2 for c2 in oauth_provider.list_clients()
+                if c2["name"] == "Desk Client"]
+        check("the connector is stored", len(made) == 1, str(len(made)))
+        made = made[0]
+        check("it has a client id and secret",
+              bool(made["client_id"]) and bool(made["client_secret"]))
+        check("it kept the redirect URI it was given",
+              made["redirect_uris"] == ["https://desk.example/cb"],
+              str(made["redirect_uris"]))
+
+        r = await c.get(f"{BASE}/clients")
+        check("the page shows the credentials to copy",
+              made["client_id"] in r.text and made["client_secret"] in r.text)
+
+        # The real assertion: drive a full OAuth flow on those credentials.
+        v4, ch4 = pkce()
+        r = await c.get(f"{BASE}/authorize", params={
+            "response_type": "code", "client_id": made["client_id"],
+            "redirect_uri": "https://desk.example/cb",
+            "code_challenge": ch4, "code_challenge_method": "S256",
+            "state": "admin-made", "scope": "content-forge"})
+        req4 = parse_qs(urlparse(r.headers.get("location", "")).query).get("req", [""])[0]
+        check("hand-made credentials reach consent", bool(req4),
+              r.headers.get("location"))
+        r = await c.post(f"{BASE}/consent", data={"req": req4, "decision": "approve"})
+        code4 = parse_qs(urlparse(r.headers.get("location", "")).query).get("code", [""])[0]
+        r = await c.post(f"{BASE}/token", data={
+            "grant_type": "authorization_code", "code": code4,
+            "redirect_uri": "https://desk.example/cb",
+            "client_id": made["client_id"], "client_secret": made["client_secret"],
+            "code_verifier": v4})
+        check("a connector made on the page issues working tokens",
+              r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+        admin_access = r.json().get("access_token") if r.status_code == 200 else None
+        check("and that token authenticates",
+              admin_access and oauth_provider.user_for_access_token(admin_access)
+              is not None)
+
+        # Correcting a redirect URI must NOT cost everyone their connection —
+        # which is the whole reason this is an edit and not a recreate.
+        r = await c.post(f"{BASE}/clients/{made['client_id']}/redirect-uris",
+                         data={"redirect_uris": "https://desk.example/cb\nhttps://desk.example/cb2"})
+        check("admin edits the redirect URIs", r.status_code == 303, r.status_code)
+        after = [x for x in oauth_provider.list_clients()
+                 if x["client_id"] == made["client_id"]][0]
+        check("both URIs stored",
+              after["redirect_uris"] == ["https://desk.example/cb",
+                                         "https://desk.example/cb2"],
+              str(after["redirect_uris"]))
+        check("the credentials did not change",
+              after["client_secret"] == made["client_secret"])
+        check("and existing tokens still work",
+              oauth_provider.user_for_access_token(admin_access) is not None)
+
+        r = await c.post(f"{BASE}/clients/{made['client_id']}/redirect-uris",
+                         data={"redirect_uris": "   "})
+        check("an empty redirect list is refused",
+              "at least one redirect URI" in r.text, r.status_code)
+        still = [x for x in oauth_provider.list_clients()
+                 if x["client_id"] == made["client_id"]][0]
+        check("the refusal changed nothing",
+              still["redirect_uris"] == after["redirect_uris"])
+
+        async with httpx2.AsyncClient(follow_redirects=False) as bobc2:
+            await bobc2.post(f"{BASE}/login",
+                             data={"username": "bob", "password": BOB_PW, "next": "/"})
+            r = await bobc2.post(f"{BASE}/clients/{made['client_id']}/redirect-uris",
+                                 data={"redirect_uris": "https://evil.example/cb"})
+            check("a non-admin cannot repoint a connector",
+                  r.status_code == 403, r.status_code)
+
+        # A leaked secret is rotated by deleting the client, so deleting must
+        # actually revoke what it issued.
+        r = await c.post(f"{BASE}/clients/{made['client_id']}/delete")
+        check("admin deletes a connector", r.status_code == 303, r.status_code)
+        check("its tokens die with it",
+              oauth_provider.user_for_access_token(admin_access) is None)
+        check("it is gone from the list",
+              not any(x["client_id"] == made["client_id"]
+                      for x in oauth_provider.list_clients()))
+
         # -- invites -------------------------------------------------------
         carol = accounts.create_user("carol")
         invite = accounts.create_invite(carol.id)
