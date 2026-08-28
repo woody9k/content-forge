@@ -438,6 +438,52 @@ disconnected there.
 
 ---
 
+## Hardening
+
+The public box runs `deploy/harden.sh`. Everything below was applied by hand
+first and then checked in, so the next host does not have to be hand-built:
+
+```bash
+sudo ./deploy/harden.sh <your-ip>
+```
+
+| | |
+|---|---|
+| **App binds loopback** | uvicorn listens on `127.0.0.1:8080`, never `0.0.0.0` |
+| **Firewall** | ufw: deny inbound except 22 (rate limited), 80, 443 |
+| **fail2ban** | jails for sshd, nginx-botsearch, nginx-bad-request |
+| **sshd** | key only, no root login, no X11/TCP/agent forwarding |
+| **Rate limits** | nginx: 20/min on the auth endpoints, 300/min on `/mcp` |
+| **CSP** | same-origin, `frame-ancestors 'none'` |
+| **Backups** | `deploy/backup.sh` nightly at 03:15, 14 days retained |
+
+Three of those are load-bearing rather than box-ticking:
+
+- **Binding to loopback is the important one.** With uvicorn on `0.0.0.0` and
+  no host firewall, the only thing between the internet and a plaintext HTTP
+  copy of the whole app — bypassing TLS, HSTS and every security header — was
+  the cloud provider's security group. nginx already proxies to
+  `127.0.0.1:8080`, so this costs nothing and closes the hole for good.
+
+- **No jail bans on 401.** An MCP connector's *first* request is
+  unauthenticated and MUST return 401 — that is how RFC 9728 advertises where
+  to get a token. A `nginx-http-auth`-style jail would blocklist the connector
+  platform mid-onboarding and break the exact flow this server exists to serve.
+
+- **Rate limits are per-endpoint, not site-wide.** The browser polls
+  `/jobs/<id>/status` about once a second while an article generates, so a
+  limit tight enough for the credential endpoints would break the UI. The auth
+  zone is tight; `/mcp` is generous, because an agent legitimately bursts.
+
+Backups cover what is not in git: `auth.db` (accounts, tokens, grants) and
+`topics/` + `voices/`. `auth.db` is copied through SQLite's backup API rather
+than `cp` — it runs in WAL mode, where a plain copy taken mid-write restores
+successfully and is silently short. They are written to local disk, which
+covers a bad deploy or a mistaken delete but **not** loss of the instance;
+getting them off the box needs credentials this host does not have.
+
+---
+
 ## Testing
 
 ```bash

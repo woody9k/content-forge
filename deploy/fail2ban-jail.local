@@ -1,0 +1,44 @@
+# Content Forge — see deploy/ in the repo for why these jails and not others.
+[DEFAULT]
+# Never ban the operator or ourselves. 67.235.203.43 is the admin's address;
+# losing SSH to your own box because a jail misfired is a worse outcome than
+# the attacks these jails prevent.
+ignoreip  = 127.0.0.1/8 ::1 67.235.203.43
+
+bantime   = 1h
+findtime  = 10m
+maxretry  = 5
+backend   = systemd
+banaction = ufw
+
+[sshd]
+enabled  = true
+port     = ssh
+# The box is key-only with passwords disabled, so these are already failing.
+# The jail is about stopping the noise and the log volume, not the risk.
+maxretry = 4
+bantime  = 2h
+
+[nginx-botsearch]
+# Scanners probing for wp-admin, .env, phpMyAdmin and friends. 41 such hits
+# were already in the logs before this was turned on.
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/write.access.log
+maxretry = 3
+bantime  = 6h
+
+[nginx-bad-request]
+# Malformed requests — the 400s that scanners generate by speaking the wrong
+# protocol at the TLS port.
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/write.access.log
+maxretry = 5
+bantime  = 2h
+
+# Deliberately NOT enabled: nginx-http-auth, or any jail keyed on 401.
+# An MCP connector's very first request is an unauthenticated one that MUST
+# return 401 — that is how RFC 9728 discovery advertises where to get a token.
+# Banning on 401 would blocklist Anthropic's infrastructure mid-onboarding and
+# break exactly the flow this server exists to serve.
