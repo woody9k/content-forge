@@ -24,9 +24,18 @@
       <tr><th>Client secret</th><td><code>{{ c.client_secret }}</code></td></tr>
     </table>
 
-    <p class="hint">Sends people back to:
-      {% for u in c.redirect_uris %}<code>{{ u }}</code>{{ ", " if not loop.last }}{% endfor %}
-    </p>
+    <form method="post" action="/clients/{{ c.client_id }}/redirect-uris">
+      <label class="row">
+        <span class="rowlabel">Sends people back to</span>
+        <textarea name="redirect_uris" rows="2">{% for u in c.redirect_uris %}{{ u }}
+{% endfor %}</textarea>
+        <span class="hint">One per line. Editing this keeps the credentials, so
+          the {{ c.connected_users }} account(s) already connected stay
+          connected — recreating the connector to fix a typo would sign them
+          all out.</span>
+      </label>
+      <button class="linkbtn" type="submit">Save</button>
+    </form>
 
     <form method="post" action="/clients/{{ c.client_id }}/delete"
           onsubmit="return confirm('Delete {{ c.name }}? Everyone connected through it — {{ c.connected_users }} account(s) — will be signed out of it and must reconnect.')">

@@ -955,6 +955,31 @@ def clients_create(request: Request, name: str = Form("Claude"),
     return RedirectResponse("/clients", status_code=303)
 
 
+@app.post("/clients/{client_id}/redirect-uris")
+def clients_set_redirects(request: Request, client_id: str,
+                          redirect_uris: str = Form("")):
+    _require_admin(request)
+    # Correcting a redirect URI in place, rather than by delete-and-recreate.
+    # The credentials survive, so everyone already connected through this
+    # client stays connected — recreating it would sign all of them out to fix
+    # a typo.
+    uris = [u.strip() for u in redirect_uris.replace(",", "\n").splitlines()
+            if u.strip()]
+    error = None
+    try:
+        if not oauth_provider.set_redirect_uris(client_id, uris):
+            error = "That connector no longer exists."
+    except ValueError as exc:
+        error = str(exc)
+    if error:
+        return _render(request, "clients.html",
+                       clients=oauth_provider.list_clients(),
+                       default_redirect=oauth_provider.CLAUDE_REDIRECT_URI,
+                       mcp_url=(public_base_url() or "") + "/mcp",
+                       error=error)
+    return RedirectResponse("/clients", status_code=303)
+
+
 @app.post("/clients/{client_id}/delete")
 def clients_delete(request: Request, client_id: str):
     _require_admin(request)

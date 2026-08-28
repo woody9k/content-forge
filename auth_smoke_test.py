@@ -520,6 +520,39 @@ async def main():
               admin_access and oauth_provider.user_for_access_token(admin_access)
               is not None)
 
+        # Correcting a redirect URI must NOT cost everyone their connection —
+        # which is the whole reason this is an edit and not a recreate.
+        r = await c.post(f"{BASE}/clients/{made['client_id']}/redirect-uris",
+                         data={"redirect_uris": "https://desk.example/cb\nhttps://desk.example/cb2"})
+        check("admin edits the redirect URIs", r.status_code == 303, r.status_code)
+        after = [x for x in oauth_provider.list_clients()
+                 if x["client_id"] == made["client_id"]][0]
+        check("both URIs stored",
+              after["redirect_uris"] == ["https://desk.example/cb",
+                                         "https://desk.example/cb2"],
+              str(after["redirect_uris"]))
+        check("the credentials did not change",
+              after["client_secret"] == made["client_secret"])
+        check("and existing tokens still work",
+              oauth_provider.user_for_access_token(admin_access) is not None)
+
+        r = await c.post(f"{BASE}/clients/{made['client_id']}/redirect-uris",
+                         data={"redirect_uris": "   "})
+        check("an empty redirect list is refused",
+              "at least one redirect URI" in r.text, r.status_code)
+        still = [x for x in oauth_provider.list_clients()
+                 if x["client_id"] == made["client_id"]][0]
+        check("the refusal changed nothing",
+              still["redirect_uris"] == after["redirect_uris"])
+
+        async with httpx2.AsyncClient(follow_redirects=False) as bobc2:
+            await bobc2.post(f"{BASE}/login",
+                             data={"username": "bob", "password": BOB_PW, "next": "/"})
+            r = await bobc2.post(f"{BASE}/clients/{made['client_id']}/redirect-uris",
+                                 data={"redirect_uris": "https://evil.example/cb"})
+            check("a non-admin cannot repoint a connector",
+                  r.status_code == 403, r.status_code)
+
         # A leaked secret is rotated by deleting the client, so deleting must
         # actually revoke what it issued.
         r = await c.post(f"{BASE}/clients/{made['client_id']}/delete")
