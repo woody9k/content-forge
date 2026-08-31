@@ -246,6 +246,11 @@ def _require_admin(request: Request) -> accounts.User:
 # helpers
 # --------------------------------------------------------------------------
 
+def _clamp_words(n: int) -> int:
+    """The word-target bounds, mirrored by the min/max on the form inputs."""
+    return max(150, min(n, 6000))
+
+
 def _topic_or_404(slug: str) -> storage.Topic:
     t = storage.get_topic(slug)
     if not t:
@@ -326,18 +331,25 @@ def create_topic(name: str = Form(...), description: str = Form(""),
 
 @app.get("/topics/{slug}", response_class=HTMLResponse)
 def topic_page(request: Request, slug: str, tab: str = "articles",
-               title: str = "", brief: str = "", fmt: str = "",
-               words: int = 900):
+               title: str = "", prompt: str = "", fmt: str = "",
+               words: str = ""):
     t = _topic_or_404(slug)
-    # title/brief/fmt/words seed the Write form — the Ideas tab links here so
+    # title/prompt/fmt/words seed the Write form — the Ideas tab links here so
     # an idea lands as an editable draft instead of generating immediately.
+    # words stays a str so a mangled link degrades to the default instead of
+    # 422ing the whole page; rounding to 50 keeps the input's step= satisfied.
+    try:
+        w = int(float(words))
+    except (ValueError, OverflowError):
+        w = 900
     return _render(request, "topic.html", topic=t, tab=tab,
                    articles=storage.list_articles(slug),
                    ideas=storage.get_ideas(slug),
                    styles=prompts.WRITING_STYLES,
+                   formats=prompts.FORMATS,
                    voices=storage.list_voices(),
-                   prefill={"title": title, "brief": brief, "fmt": fmt,
-                            "words": max(150, min(words, 6000))})
+                   prefill={"title": title, "prompt": prompt, "fmt": fmt,
+                            "words": _clamp_words((w + 25) // 50 * 50)})
 
 
 @app.post("/topics/{slug}/edit")
@@ -514,7 +526,7 @@ def new_article(slug: str, title: str = Form(...), prompt: str = Form(""),
     vslug = _usable_voice(voice)
     a = storage.create_article(slug, title, prompt or title,
                                with_references=bool(references),
-                               word_target=max(150, min(words, 6000)), fmt=fmt,
+                               word_target=_clamp_words(words), fmt=fmt,
                                voice=vslug, styles=valid_styles)
     a.status = "generating"
     job = jobs.submit("article", f"{t.name} — {a.title}",
@@ -565,7 +577,7 @@ def regenerate(slug: str, aslug: str, prompt: str = Form(""),
     a.styles = [s for s in styles if s in prompts.WRITING_STYLES]
     a.voice = _usable_voice(voice)
     if words:
-        a.word_target = max(150, min(words, 6000))
+        a.word_target = _clamp_words(words)
     a.status = "generating"
     storage.save_article_meta(a)
     job = jobs.submit("article", f"Rewrite — {a.title}",

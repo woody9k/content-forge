@@ -67,7 +67,7 @@
              placeholder="The model may sharpen this">
       <label for="prompt">Brief</label>
       <textarea id="prompt" name="prompt" rows="5"
-        placeholder="What should this piece argue or deliver? Angle, must-hit points, anything to avoid.">{{ prefill.brief }}</textarea>
+        placeholder="What should this piece argue or deliver? Angle, must-hit points, anything to avoid.">{{ prefill.prompt }}</textarea>
       <div class="row">
         <div>
           <label for="voice">Voice</label>
@@ -81,7 +81,11 @@
         <div>
           <label for="fmt">Format</label>
           <select id="fmt" name="fmt">
-            {% for f in ["blog post","how-to","listicle","opinion","explainer","review","newsletter","interview"] %}
+            {# an idea may carry a format outside the standard list; keep it
+               rather than silently falling back to the first option #}
+            {% if prefill.fmt and prefill.fmt not in formats %}
+            <option selected>{{ prefill.fmt }}</option>{% endif %}
+            {% for f in formats %}
             <option {{ "selected" if f == prefill.fmt }}>{{ f }}</option>{% endfor %}
           </select>
         </div>
@@ -132,7 +136,7 @@
     <h3>{{ i.title }}</h3>
     <p>{{ i.angle }}</p>
     <p style="color:var(--muted)"><strong>Why now:</strong> {{ i.why }}</p>
-    <a class="btn sm" href="?tab=write&title={{ i.title|urlencode }}&brief={{ (i.angle ~ " — " ~ i.why)|urlencode }}&fmt={{ i.format|urlencode }}&words={{ i.words or 900 }}">Write this</a>
+    <a class="btn sm" href="?tab=write&amp;title={{ i.title|urlencode }}&amp;prompt={{ ([i.angle, i.why]|select|join(' — '))|urlencode }}&amp;fmt={{ i.format|urlencode }}&amp;words={{ i.words or 900 }}">Write this</a>
   </div>
   {% endfor %}
   {% endif %}
