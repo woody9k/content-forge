@@ -63,10 +63,11 @@
     <form method="post" action="/topics/{{ topic.slug }}/articles">
       <label for="title">Working title</label>
       <input type="text" id="title" name="title" required
+             value="{{ prefill.title }}"
              placeholder="The model may sharpen this">
       <label for="prompt">Brief</label>
       <textarea id="prompt" name="prompt" rows="5"
-        placeholder="What should this piece argue or deliver? Angle, must-hit points, anything to avoid."></textarea>
+        placeholder="What should this piece argue or deliver? Angle, must-hit points, anything to avoid.">{{ prefill.prompt }}</textarea>
       <div class="row">
         <div>
           <label for="voice">Voice</label>
@@ -80,13 +81,17 @@
         <div>
           <label for="fmt">Format</label>
           <select id="fmt" name="fmt">
-            {% for f in ["blog post","how-to","listicle","opinion","explainer","review","newsletter","interview"] %}
-            <option>{{ f }}</option>{% endfor %}
+            {# an idea may carry a format outside the standard list; keep it
+               rather than silently falling back to the first option #}
+            {% if prefill.fmt and prefill.fmt not in formats %}
+            <option selected>{{ prefill.fmt }}</option>{% endif %}
+            {% for f in formats %}
+            <option {{ "selected" if f == prefill.fmt }}>{{ f }}</option>{% endfor %}
           </select>
         </div>
         <div>
           <label for="words">Target words</label>
-          <input type="number" id="words" name="words" value="900" min="150" max="6000" step="50">
+          <input type="number" id="words" name="words" value="{{ prefill.words }}" min="150" max="6000" step="50">
         </div>
       </div>
       <label>Writing style <span class="hint">(optional — layers on top of the author's voice; pick one or combine a few)</span></label>
@@ -131,20 +136,7 @@
     <h3>{{ i.title }}</h3>
     <p>{{ i.angle }}</p>
     <p style="color:var(--muted)"><strong>Why now:</strong> {{ i.why }}</p>
-    <form method="post" action="/topics/{{ topic.slug }}/articles">
-      <input type="hidden" name="title" value="{{ i.title }}">
-      <input type="hidden" name="prompt" value="{{ i.angle }} — {{ i.why }}">
-      <input type="hidden" name="fmt" value="{{ i.format }}">
-      <input type="hidden" name="words" value="{{ i.words }}">
-      <select name="voice" style="max-width:16rem">
-        <option value="">Generic (no voice)</option>
-        {% for v in voices if v.has_profile %}
-        <option value="{{ v.slug }}">{{ v.name }}</option>
-        {% endfor %}
-      </select>
-      <label class="check" style="margin:0"><input type="checkbox" name="references" value="1"> with references</label>
-      <button class="btn sm" type="submit">Write this</button>
-    </form>
+    <a class="btn sm" href="?tab=write&amp;title={{ i.title|urlencode }}&amp;prompt={{ ([i.angle, i.why]|select|join(' — '))|urlencode }}&amp;fmt={{ i.format|urlencode }}&amp;words={{ i.words or 900 }}">Write this</a>
   </div>
   {% endfor %}
   {% endif %}

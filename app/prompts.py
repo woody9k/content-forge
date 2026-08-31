@@ -75,6 +75,12 @@ WRITING_STYLES: dict[str, str] = {
         "authority.",
 }
 
+# The one authoritative list of article formats: the Write form's dropdown,
+# and the vocabulary the idea generator is told to use. (mcp_server.py keeps
+# a matching Literal for its tool schema — Literals can't be built from this.)
+FORMATS = ["blog post", "how-to", "listicle", "opinion", "explainer",
+           "review", "newsletter", "interview"]
+
 
 def article_system(voice_profile: str, styles: list[str] | None = None) -> str:
     style_block = ""
@@ -182,6 +188,6 @@ Return ONLY a JSON array, no prose around it, no code fence. Each element:
   "title": "the working headline",
   "angle": "one or two sentences on what this piece actually argues or delivers",
   "why": "why this earns a reader's attention right now",
-  "format": "blog post | how-to | listicle | opinion | explainer | review | interview",
+  "format": "{" | ".join(FORMATS)}",
   "words": 900
 }}"""

@@ -192,6 +192,23 @@ j = settle(c.post(f"/topics/{slug}/ideas", data={"count": "2", "research": "1"},
 check("ideas job", j.status == "done", j.error)
 check("ideas persisted", len(storage.get_ideas(slug)) == 2)
 check("ideas render", "Stub idea one" in c.get(f"/topics/{slug}?tab=ideas").text)
+check("ideas link to the write tab", "?tab=write&amp;title=" in
+      c.get(f"/topics/{slug}?tab=ideas").text)
+
+# "Write this" seeds the Write form; the user finishes the choices there
+t = c.get(f"/topics/{slug}", params={
+    "tab": "write", "title": 'Prefilled "quoted" title',
+    "prompt": "Angle — why now", "fmt": "listicle", "words": "1225"}).text
+check("prefill title lands", 'value="Prefilled &#34;quoted&#34; title"' in t)
+check("prefill brief lands", ">Angle — why now</textarea>" in t)
+check("prefill format selected", "<option selected>listicle</option>" in t)
+check("prefill words rounded to step", 'value="1250"' in t)
+t = c.get(f"/topics/{slug}", params={"tab": "write", "fmt": "case study"}).text
+check("unknown format kept, not dropped", "<option selected>case study</option>" in t)
+check("bad words value degrades, not 422s",
+      'value="900"' in c.get(f"/topics/{slug}?tab=write&words=oops").text)
+check("plain write tab keeps its defaults",
+      'value="900"' in c.get(f"/topics/{slug}?tab=write").text)
 
 print("\n--- articles ---")
 r = c.post(f"/topics/{slug}/articles",
