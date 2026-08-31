@@ -325,13 +325,19 @@ def create_topic(name: str = Form(...), description: str = Form(""),
 
 
 @app.get("/topics/{slug}", response_class=HTMLResponse)
-def topic_page(request: Request, slug: str, tab: str = "articles"):
+def topic_page(request: Request, slug: str, tab: str = "articles",
+               title: str = "", brief: str = "", fmt: str = "",
+               words: int = 900):
     t = _topic_or_404(slug)
+    # title/brief/fmt/words seed the Write form — the Ideas tab links here so
+    # an idea lands as an editable draft instead of generating immediately.
     return _render(request, "topic.html", topic=t, tab=tab,
                    articles=storage.list_articles(slug),
                    ideas=storage.get_ideas(slug),
                    styles=prompts.WRITING_STYLES,
-                   voices=storage.list_voices())
+                   voices=storage.list_voices(),
+                   prefill={"title": title, "brief": brief, "fmt": fmt,
+                            "words": max(150, min(words, 6000))})
 
 
 @app.post("/topics/{slug}/edit")
